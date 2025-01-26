@@ -15,6 +15,15 @@ class HealthCheck(BaseModel):
     last_updated: datetime
     metrics: Dict[str, float]
 
+class AgentCapabilities(BaseModel):
+    """Model for agent capabilities response."""
+    name: str
+    version: str
+    capabilities: List[str]
+    input_schema: Dict[str, Any]
+    output_schema: Dict[str, Any]
+    rate_limits: Dict[str, int]
+
 class HeadingData(BaseModel):
     """Model for hierarchical heading data using 'heading ^ subheading' notation."""
     heading: str

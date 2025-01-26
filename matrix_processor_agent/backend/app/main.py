@@ -145,6 +145,57 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Agent configuration
+AGENT_CONFIG = {
+    "name": "MatrixProcessorAgent",
+    "version": "1.0.0",
+    "capabilities": [
+        "matrix-parsing",
+        "guideline-extraction",
+        "pdf-to-image-conversion",
+        "ocr-processing"
+    ],
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "file_url": {
+                "type": "string",
+                "format": "uri",
+                "description": "URL of the matrix image or PDF file to process"
+            }
+        },
+        "required": ["file_url"]
+    },
+    "output_schema": {
+        "type": "object",
+        "properties": {
+            "data": {
+                "type": "object",
+                "properties": {
+                    "ltv_requirements": {"type": "object"},
+                    "credit_requirements": {"type": "object"},
+                    "income_requirements": {"type": "object"},
+                    "property_requirements": {"type": "object"},
+                    "additional_requirements": {"type": "object"}
+                }
+            },
+            "validation": {
+                "type": "object",
+                "properties": {
+                    "errors": {"type": "array"},
+                    "warnings": {"type": "array"}
+                }
+            },
+            "processing_info": {
+                "type": "object",
+                "properties": {
+                    "confidence_scores": {"type": "object"}
+                }
+            }
+        }
+    }
+}
+
 @app.get("/health")
 async def health_check(rate_limit: bool = Depends(rate_limiter)) -> HealthCheck:
     """Health check endpoint for the marketplace."""
@@ -214,6 +265,21 @@ async def health_check(rate_limit: bool = Depends(rate_limiter)) -> HealthCheck:
                 "average_response_time": avg_response_time
             }
         )
+
+@app.get("/capabilities")
+async def get_capabilities(rate_limit: bool = Depends(rate_limiter)) -> AgentCapabilities:
+    """Get agent capabilities endpoint for the marketplace."""
+    return AgentCapabilities(
+        name=AGENT_CONFIG["name"],
+        version=AGENT_CONFIG["version"],
+        capabilities=AGENT_CONFIG["capabilities"],
+        input_schema=AGENT_CONFIG["input_schema"],
+        output_schema=AGENT_CONFIG["output_schema"],
+        rate_limits={
+            "requests_per_second": MAX_REQUESTS_PER_WINDOW / RATE_LIMIT_WINDOW,
+            "burst_limit": MAX_REQUESTS_PER_WINDOW
+        }
+    )
 
 @app.get("/healthz")
 async def healthz(rate_limit: bool = Depends(rate_limiter)):
