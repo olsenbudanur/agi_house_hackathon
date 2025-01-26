@@ -20,12 +20,13 @@ from ..services.embedding import compute_agent_embedding
 from datetime import datetime
 import logging
 
+# Initialize logger
+logger = logging.getLogger(__name__)
+
 # Configure OpenAI API key from environment
 openai.api_key = os.getenv("OPENAI_API_KEY")
 if not openai.api_key:
     logger.warning("OPENAI_API_KEY environment variable not set. find-and-invoke endpoint will not work.")
-
-logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/agents", tags=["agents"])
 
@@ -380,14 +381,21 @@ async def find_and_invoke_agent(request: UniversalAgentRequest):
     
     logger = getLogger(__name__)
     
+    # Import required modules
+    import openai
+    from jsonschema import validate, ValidationError
+    import json
+    import uuid
+    
+    # Load all agents in the database
+    agents = db.list_agents()
+    if not agents:
+        raise HTTPException(
+            status_code=404,
+            detail="No agents available in the marketplace"
+        )
+        
     try:
-        # Load all agents in the database
-        agents = db.list_agents()
-        if not agents:
-            raise HTTPException(
-                status_code=404,
-                detail="No agents available in the marketplace"
-            )
         
         # Create a system prompt to find the most suitable agent
         prompt = "You are an AI agent selector tasked with matching user queries to the most appropriate agent and formatting their input correctly. Your task is to:\n"
@@ -428,194 +436,301 @@ async def find_and_invoke_agent(request: UniversalAgentRequest):
         prompt += "3. If you cannot find a suitable agent, respond with {\"error\": \"No suitable agent found\"}\n"
         prompt += "4. If you cannot construct valid input parameters, respond with {\"error\": \"Cannot construct valid input\"}\n"
         
-        # Call OpenAI API
+        # Define the JSON response schema
+        json_schema = {
+            "type": "object",
+            "properties": {
+                "selected_agent": {"type": "string"},
+                "reason": {"type": "string"},
+                "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+                "input_parameters": {"type": "object"},
+                "error": {"type": "string"}
+            },
+            "required": ["selected_agent", "reason", "confidence", "input_parameters"]
+        }
+
+        # Call OpenAI API with JSON mode
         response = openai.ChatCompletion.create(
             model="gpt-4",
             messages=[
                 {"role": "system", "content": prompt}
             ],
             temperature=request.temperature,
-            max_tokens=request.max_tokens
+            max_tokens=request.max_tokens,
+            response_format={"type": "json_object", "schema": json_schema}
         )
         
-        # Parse OpenAI response
-        try:
-            import json
-            selection = json.loads(response.choices[0].message.content)
+        # Get response (guaranteed to be valid JSON in JSON mode)
+        selection = json.loads(response.choices[0].message.content)
             
-            # Check for error responses from the LLM
-            if "error" in selection:
-                raise HTTPException(
-                    status_code=400,
-                    detail=selection["error"]
-                )
-            
-            # Extract required fields
-            selected_agent_name = selection.get("selected_agent")
-            input_parameters = selection.get("input_parameters")
-            confidence = selection.get("confidence", "low")
-            reason = selection.get("reason", "No reason provided")
-            
-            if not selected_agent_name or not input_parameters:
-                raise ValueError("Missing required fields in LLM response")
-            
-            # Log the selection details
-            logger.info(f"Selected agent: {selected_agent_name}")
-            logger.info(f"Selection confidence: {confidence}")
-            logger.info(f"Selection reason: {reason}")
-            
-            # Find the selected agent
-            selected_agent = next(
-                (a for a in agents if a["agent_name"] == selected_agent_name),
-                None
+        # Check for error responses from the LLM
+        if "error" in selection:
+            trace_id = str(uuid.uuid4())
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "status": "error",
+                    "error": {
+                        "code": "NO_SUITABLE_AGENT",
+                        "message": selection["error"],
+                        "details": {
+                            "error_type": "AgentSelectionError",
+                            "query": request.query
+                        }
+                    },
+                    "trace_id": trace_id
+                }
+            )
+        
+        # Extract required fields
+        selected_agent_name = selection.get("selected_agent")
+        input_parameters = selection.get("input_parameters")
+        confidence = selection.get("confidence", "low")
+        reason = selection.get("reason", "No reason provided")
+        
+        if not selected_agent_name or not input_parameters:
+            trace_id = str(uuid.uuid4())
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "status": "error",
+                    "error": {
+                        "code": "INVALID_LLM_RESPONSE",
+                        "message": "Missing required fields in LLM response",
+                        "details": {
+                            "error_type": "ValidationError",
+                            "missing_fields": [
+                                "selected_agent" if not selected_agent_name else None,
+                                "input_parameters" if not input_parameters else None
+                            ]
+                        }
+                    },
+                    "trace_id": trace_id
+                }
+            )
+        
+        # Log the selection details
+        logger.info(f"Selected agent: {selected_agent_name}")
+        logger.info(f"Selection confidence: {confidence}")
+        logger.info(f"Selection reason: {reason}")
+        
+        # Find the selected agent
+        selected_agent = next(
+            (a for a in agents if a["agent_name"] == selected_agent_name),
+            None
+        )
+        
+        if not selected_agent:
+            trace_id = str(uuid.uuid4())
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "status": "error",
+                    "error": {
+                        "code": "AGENT_NOT_FOUND",
+                        "message": f"Selected agent '{selected_agent_name}' not found",
+                        "details": {
+                            "error_type": "AgentSelectionError",
+                            "selected_agent": selected_agent_name,
+                            "available_agents": [a["agent_name"] for a in agents]
+                        }
+                    },
+                    "trace_id": trace_id
+                }
             )
             
-            if not selected_agent:
-                raise ValueError(f"Selected agent '{selected_agent_name}' not found")
-            
-            # Extract and validate schema
-            input_schema = selected_agent["input_schema"]
-            logger.debug(f"Agent input schema: {json.dumps(input_schema, indent=2)}")
-            
-            # Pre-validation checks
-            if not isinstance(input_parameters, dict):
-                raise HTTPException(
-                    status_code=400,
-                    detail="Generated input parameters must be a JSON object"
-                )
-            
-            # Check for required fields before validation
+        # Extract and validate schema
+        input_schema = selected_agent["input_schema"]
+        logger.debug(f"Agent input schema: {json.dumps(input_schema, indent=2)}")
+        trace_id = str(uuid.uuid4())
+        
+        # Pre-validation checks
+        if not isinstance(input_parameters, dict):
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "status": "error",
+                    "error": {
+                        "code": "VALIDATION_ERROR",
+                        "message": "Schema validation failed: input parameters must be a JSON object",
+                        "details": {
+                            "error_type": "TypeError",
+                            "received_type": str(type(input_parameters))
+                        }
+                    },
+                    "trace_id": trace_id
+                }
+            )
+        
+        # Full schema validation
+        try:
+            # Check required fields first
             if "required" in input_schema:
                 missing_fields = [
                     field for field in input_schema["required"]
                     if field not in input_parameters
                 ]
                 if missing_fields:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Missing required fields: {', '.join(missing_fields)}"
-                    )
-            
-            # Full schema validation
-            try:
-                validate(instance=input_parameters, schema=input_schema)
-                logger.info("Input parameters validated successfully")
-                
-                # Log the matched fields for debugging
-                if "properties" in input_schema:
-                    matched_fields = {
-                        field: input_parameters.get(field)
-                        for field in input_schema["properties"]
-                        if field in input_parameters
+                    error_response = {
+                        "status": "error",
+                        "error": {
+                            "code": "VALIDATION_ERROR",
+                            "message": "Missing required fields in input parameters",
+                            "details": {
+                                "error_type": "ValidationError",
+                                "missing_fields": missing_fields,
+                                "schema": input_schema,
+                                "received": input_parameters
+                            }
+                        },
+                        "trace_id": trace_id
                     }
-                    logger.debug(f"Matched fields: {json.dumps(matched_fields, indent=2)}")
-                
-            except ValidationError as e:
-                logger.error(f"Schema validation failed: {str(e)}")
-                # Enhanced error message with schema comparison
-                error_detail = {
-                    "message": "Generated input parameters do not match agent schema",
-                    "validation_error": str(e),
-                    "received_parameters": input_parameters,
-                    "expected_schema": input_schema
+                    raise HTTPException(status_code=400, detail=error_response)
+            
+            # Then do full schema validation
+            validate(instance=input_parameters, schema=input_schema)
+            logger.info("Input parameters validated successfully")
+        except ValidationError as e:
+            error_response = {
+                "status": "error",
+                "error": {
+                    "code": "VALIDATION_ERROR",
+                    "message": "Missing required fields in input parameters",
+                    "details": {
+                        "error_type": "ValidationError",
+                        "validation_error": str(e),
+                        "schema": input_schema,
+                        "received": input_parameters
+                    }
+                },
+                "trace_id": trace_id
+            }
+            raise HTTPException(status_code=400, detail=error_response)
+            
+            # Log the matched fields for debugging
+            if "properties" in input_schema:
+                matched_fields = {
+                    field: input_parameters.get(field)
+                    for field in input_schema["properties"]
+                    if field in input_parameters
                 }
+                logger.debug(f"Matched fields: {json.dumps(matched_fields, indent=2)}")
+            
+        except ValidationError as e:
+            logger.error(f"Schema validation failed: {str(e)}")
+            # Enhanced error message with schema comparison
+            trace_id = str(uuid.uuid4())
+            error_response = {
+                "status": "error",
+                "error": {
+                    "code": "VALIDATION_ERROR",
+                    "message": "Schema validation failed: input parameters do not match agent schema",
+                    "details": {
+                        "error_type": "ValidationError",
+                        "validation_error": str(e),
+                        "received_parameters": input_parameters,
+                        "expected_schema": input_schema
+                    }
+                },
+                "trace_id": trace_id
+            }
+            raise HTTPException(status_code=400, detail=error_response)
+            
+        # Prepare invocation context
+        trace_id = str(uuid.uuid4())
+        timeout = min(request.timeout or 30, 300)  # Cap at 5 minutes
+        
+        # Create invocation request with metadata
+        invoke_request = InvocationRequest(
+            input=input_parameters,
+            trace_id=trace_id,
+            timeout=timeout
+        )
+        
+        # Log the invocation details
+        logger.info(f"Invoking agent: {selected_agent['agent_name']} (ID: {selected_agent['agent_id']})")
+        logger.info(f"Trace ID: {trace_id}")
+        logger.info(f"Confidence level: {confidence}")
+        logger.info(f"Selection reason: {reason}")
+        logger.debug(f"Input parameters: {json.dumps(input_parameters, indent=2)}")
+        
+        try:
+            # Invoke the selected agent
+            response = await invoke_agent(
+                agent_id=selected_agent["agent_id"],
+                request=InvocationRequest(
+                    input=input_parameters,
+                    trace_id=trace_id,
+                    timeout=timeout
+                )
+            )
+
+            # Add metadata to successful response
+            if response.status == "success":
+                if not response.result:
+                    response.result = {}
+                response.result.update({
+                    "_agent_selection_metadata": {
+                        "selected_agent": selected_agent_name,
+                        "confidence": confidence,
+                        "reason": reason
+                    }
+                })
+
+            return response
+            
+        except Exception as e:
+            logger.error(f"Agent invocation failed: {str(e)}")
+            if isinstance(e, ValidationError):
                 raise HTTPException(
                     status_code=400,
-                    detail=error_detail
+                    detail={
+                        "status": "error",
+                        "error": {
+                            "code": "VALIDATION_ERROR",
+                            "message": "Generated input parameters do not match agent schema",
+                            "details": {
+                                "error_type": "ValidationError",
+                                "error_message": str(e),
+                                "schema": input_schema
+                            }
+                        },
+                        "trace_id": trace_id
+                    }
                 )
-            
-            # Prepare invocation context
-            trace_id = str(uuid.uuid4())
-            timeout = min(request.timeout or 30, 300)  # Cap at 5 minutes
-            
-            # Create invocation request with metadata
-            invoke_request = InvocationRequest(
-                input=input_parameters,
-                trace_id=trace_id,
-                timeout=timeout
-            )
-            
-            # Log the invocation details
-            logger.info(f"Invoking agent: {selected_agent['agent_name']} (ID: {selected_agent['agent_id']})")
-            logger.info(f"Trace ID: {trace_id}")
-            logger.info(f"Confidence level: {confidence}")
-            logger.info(f"Selection reason: {reason}")
-            logger.debug(f"Input parameters: {json.dumps(input_parameters, indent=2)}")
-            
-            try:
-                # Invoke the selected agent
-                response = await invoke_agent(
-                    agent_id=selected_agent["agent_id"],
-                    request=invoke_request
+            else:
+                raise HTTPException(
+                    status_code=500,
+                    detail={
+                        "status": "error",
+                        "error": {
+                            "code": "INVOCATION_ERROR",
+                            "message": "Failed to invoke selected agent",
+                            "details": {
+                                "error_type": type(e).__name__,
+                                "error_message": str(e),
+                                "selected_agent": selected_agent_name,
+                                "confidence": confidence,
+                                "reason": reason
+                            }
+                        },
+                        "trace_id": trace_id
+                    }
                 )
-                
-                # Add context to successful response
-                if response.status == "success":
-                    if not response.result:
-                        response.result = {}
-                    response.result.update({
-                        "_agent_selection_metadata": {
-                            "selected_agent": selected_agent_name,
-                            "confidence": confidence,
-                            "reason": reason
-                        }
-                    })
-                
-                return response
-                
-            except Exception as e:
-                logger.error(f"Agent invocation failed: {str(e)}")
-                return InvocationResponse(
-                    status="error",
-                    error={
-                        "code": "INVOCATION_ERROR",
-                        "message": "Failed to invoke selected agent",
-                        "details": {
-                            "error_type": type(e).__name__,
-                            "error_message": str(e),
-                            "selected_agent": selected_agent_name,
-                            "confidence": confidence,
-                            "reason": reason
-                        }
-                    },
-                    trace_id=trace_id
-                )
-            
-        except json.JSONDecodeError as e:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Failed to parse OpenAI response: {str(e)}"
-            )
-        except ValidationError as e:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Generated input parameters do not match agent schema: {str(e)}"
-            )
-            
-    except HTTPException:
-        raise
-    except json.JSONDecodeError as e:
-        logger.error(f"Failed to parse OpenAI response: {str(e)}")
-        return InvocationResponse(
-            status="error",
-            error={
-                "code": "OPENAI_RESPONSE_ERROR",
-                "message": "Failed to parse OpenAI response",
-                "details": {
-                    "error_type": "JSONDecodeError",
-                    "error_message": str(e),
-                    "raw_response": response.choices[0].message.content if response and response.choices else None
-                }
-            },
-            trace_id=str(uuid.uuid4())
-        )
+
     except Exception as e:
+        trace_id = str(uuid.uuid4())
         logger.error(f"Error in find_and_invoke_agent: {str(e)}")
-        return InvocationResponse(
-            status="error",
-            error={
+        
+        # If it's already an HTTPException with a properly formatted error response, re-raise it
+        if isinstance(e, HTTPException) and isinstance(e.detail, dict) and "error" in e.detail:
+            raise e
+        
+        error_response = {
+            "status": "error",
+            "error": {
                 "code": "INTERNAL_ERROR",
-                "message": "An unexpected error occurred while processing your request",
+                "message": "An unexpected error occurred",
                 "details": {
                     "error_type": type(e).__name__,
                     "error_message": str(e),
@@ -623,5 +738,66 @@ async def find_and_invoke_agent(request: UniversalAgentRequest):
                     "additional_context": request.additional_context
                 }
             },
-            trace_id=str(uuid.uuid4())
-        )
+            "trace_id": trace_id
+        }
+        
+        if "InvalidRequestError" in str(type(e)):
+            error_response["error"]["code"] = "OPENAI_REQUEST_ERROR"
+            error_response["error"]["message"] = "Invalid request to OpenAI API"
+            error_response["error"]["details"]["error_type"] = "InvalidRequestError"
+            raise HTTPException(status_code=400, detail=error_response)
+        elif isinstance(e, HTTPException):
+            error_response["error"]["code"] = "REQUEST_ERROR"
+            error_response["error"]["message"] = str(e.detail)
+            error_response["error"]["details"]["error_type"] = "HTTPException"
+            error_response["error"]["details"]["status_code"] = e.status_code
+            raise HTTPException(status_code=e.status_code, detail=error_response)
+        else:
+            raise HTTPException(status_code=500, detail=error_response)
+    except HTTPException:
+        raise
+    except Exception as e:
+        trace_id = str(uuid.uuid4())
+        logger.error(f"Error in find_and_invoke_agent: {str(e)}")
+        
+        error_response = {
+            "status": "error",
+            "error": {
+                "code": "INTERNAL_ERROR",
+                "message": "An unexpected error occurred",
+                "details": {
+                    "error_type": type(e).__name__,
+                    "error_message": str(e),
+                    "query": request.query,
+                    "additional_context": request.additional_context
+                }
+            },
+            "trace_id": trace_id
+        }
+        
+        if isinstance(e, openai.error.OpenAIError):
+            error_response["error"]["code"] = "OPENAI_API_ERROR"
+            error_response["error"]["message"] = "OpenAI API error occurred"
+            error_response["error"]["details"] = {
+                "error_type": type(e).__name__,
+                "error_message": str(e)
+            }
+            raise HTTPException(status_code=500, detail=error_response)
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "status": "error",
+                    "error": {
+                        "code": "INTERNAL_ERROR",
+                        "message": "An unexpected error occurred while processing your request",
+                        "details": {
+                            "error_type": type(e).__name__,
+                            "error_message": str(e),
+                            "query": request.query,
+                            "additional_context": request.additional_context
+                        }
+                    },
+                    "trace_id": trace_id
+                }
+            )

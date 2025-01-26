@@ -18,6 +18,7 @@ packaging = "^24.2"
 redis = "^5.0.1"
 numpy = "^2.2.2"
 jsonschema = "^4.23.0"
+openai = "^1.60.1"
 
 [tool.poetry.group.test.dependencies]
 pytest = "^7.4.4"
