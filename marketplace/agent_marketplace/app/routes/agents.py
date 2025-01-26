@@ -29,9 +29,12 @@ logger = logging.getLogger(__name__)
 
 # Configure OpenAI client using environment variable
 openai.api_key = os.getenv("OPENAI_API_KEY")
+if not openai.api_key:
+    logger.error("OpenAI API key not found in environment")
+    raise ValueError("OpenAI API key not configured")
 logger.info("OpenAI API key configured from environment")
 
-router = APIRouter(prefix="/agents", tags=["agents"])
+router = APIRouter(tags=["agents"])
 
 @router.post("/register", response_model=AgentResponse)
 async def register_agent(agent: AgentRegistration):
@@ -403,7 +406,13 @@ async def find_and_invoke_agent(
         prompt += "1. Carefully analyze the user's query to understand their intent\n"
         prompt += "2. Select the most suitable agent based on capabilities and requirements\n"
         prompt += "3. Extract or infer required parameters from the query to match the agent's input schema\n"
-        prompt += "4. Format the input exactly according to the schema, ensuring all required fields are present\n\n"
+        prompt += "4. Format the input exactly according to the schema, ensuring all required fields are present\n"
+        prompt += "5. For sentiment analysis tasks, prefer agents with explicit sentiment-analysis capability\n"
+        prompt += "6. For text analysis, use the text from the query or a default if none provided\n\n"
+        prompt += "Special Instructions for Sentiment Analysis:\n"
+        prompt += "- When user asks for sentiment analysis, look for agents with 'sentiment-analysis' capability\n"
+        prompt += "- For NewsAnalyzer, use 'sentiment' as analysis_type and extract keywords from the query\n"
+        prompt += "- Default timeframe to '1h' if not specified\n\n"
         
         prompt += "Available agents:\n"
         for agent in agents:
@@ -462,17 +471,67 @@ async def find_and_invoke_agent(
 
         # Call OpenAI API with JSON mode using configured client
         try:
-            client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+            api_key = os.getenv("OPENAI_API_KEY")
+            if not api_key:
+                raise ValueError("OpenAI API key not found in environment")
+                
+            client = openai.OpenAI(api_key=api_key)
             response = client.chat.completions.create(
-                model="gpt-4",
+                model="gpt-3.5-turbo-1106",  # Using a model that supports JSON mode
                 messages=[
                     {"role": "system", "content": prompt},
                     {"role": "user", "content": "Remember to respond ONLY with valid JSON matching the specified format."}
                 ],
                 temperature=request.temperature or 0.7,
-                max_tokens=request.max_tokens or 1000
+                max_tokens=request.max_tokens or 1000,
+                response_format={"type": "json_object"}  # Ensure JSON response
             )
-            logger.info(f"OpenAI API response received: {response.choices[0].message.content}")
+            
+            if not response.choices or not response.choices[0].message or not response.choices[0].message.content:
+                raise ValueError("Empty response from OpenAI API")
+            
+            response_content = response.choices[0].message.content
+            logger.info(f"OpenAI API response received: {response_content}")
+            
+            try:
+                selection = json.loads(response_content)
+                logger.info(f"Parsed OpenAI selection: {selection}")
+                
+                # Log available agents for debugging
+                logger.info(f"Available agents: {[agent['agent_name'] for agent in agents]}")
+                logger.info(f"Agent capabilities: {[(agent['agent_name'], agent['capabilities']) for agent in agents]}")
+                logger.info(f"Query being processed: {request.query}")
+                
+                # Validate selection format
+                if not isinstance(selection, dict):
+                    raise ValueError("OpenAI response is not a JSON object")
+                    
+                if "error" in selection:
+                    raise HTTPException(
+                        status_code=404,
+                        detail={
+                            "status": "error",
+                            "error": {
+                                "code": "NO_SUITABLE_AGENT",
+                                "message": selection["error"],
+                                "details": {
+                                    "error_type": "AgentSelectionError",
+                                    "query": request.query
+                                }
+                            },
+                            "trace_id": str(uuid.uuid4())
+                        }
+                    )
+                    
+                required_fields = ["selected_agent", "reason", "confidence", "input_parameters"]
+                missing_fields = [field for field in required_fields if field not in selection]
+                if missing_fields:
+                    raise ValueError(f"Missing required fields in OpenAI response: {missing_fields}")
+                    
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to parse OpenAI response as JSON: {str(e)}")
+                raise ValueError(f"Invalid JSON in OpenAI response: {str(e)}")
+                
         except Exception as e:
             logger.error(f"OpenAI API call failed: {str(e)}")
             raise HTTPException(
@@ -481,7 +540,7 @@ async def find_and_invoke_agent(
                     "status": "error",
                     "error": {
                         "code": "OPENAI_API_ERROR",
-                        "message": "Failed to call OpenAI API",
+                        "message": "Failed to process OpenAI API response",
                         "details": {
                             "error_type": type(e).__name__,
                             "error_message": str(e)
@@ -494,6 +553,9 @@ async def find_and_invoke_agent(
         # Get response (guaranteed to be valid JSON in JSON mode)
         selection = json.loads(response.choices[0].message.content)
         logger.info(f"OpenAI selection response: {selection}")
+        
+        # Generate trace ID for this request
+        trace_id = str(uuid.uuid4())
         
         # Check for error response
         if "error" in selection:
@@ -603,7 +665,7 @@ async def find_and_invoke_agent(
                             "details": {
                                 "error_type": "ValidationError",
                                 "error_message": str(e),
-                                "schema": input_schema
+                                "schema": selected_agent["input_schema"] if selected_agent else None
                             }
                         },
                         "trace_id": trace_id
@@ -619,9 +681,9 @@ async def find_and_invoke_agent(
                         "details": {
                             "error_type": type(e).__name__,
                             "error_message": str(e),
-                            "selected_agent": selected_agent_name,
-                            "confidence": confidence,
-                            "reason": reason
+                            "selected_agent": selection.get("selected_agent"),
+                            "confidence": selection.get("confidence"),
+                            "reason": selection.get("reason")
                         }
                     },
                     "trace_id": trace_id
@@ -651,7 +713,7 @@ async def find_and_invoke_agent(
             "trace_id": trace_id
         }
         
-        if isinstance(e, openai.error.OpenAIError):
+        if "openai" in str(type(e)).lower():
             error_response["error"]["code"] = "OPENAI_API_ERROR"
             error_response["error"]["message"] = "OpenAI API error occurred"
             error_response["error"]["details"] = {
@@ -659,11 +721,6 @@ async def find_and_invoke_agent(
                 "error_message": str(e)
             }
             raise HTTPException(status_code=500, detail=error_response)
-        elif "InvalidRequestError" in str(type(e)):
-            error_response["error"]["code"] = "OPENAI_REQUEST_ERROR"
-            error_response["error"]["message"] = "Invalid request to OpenAI API"
-            error_response["error"]["details"]["error_type"] = "InvalidRequestError"
-            raise HTTPException(status_code=400, detail=error_response)
         elif isinstance(e, HTTPException):
             error_response["error"]["code"] = "REQUEST_ERROR"
             error_response["error"]["message"] = str(e.detail)
