@@ -1,10 +1,13 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, Request, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
 import os
 import logging
 import datetime
-from typing import List
+import time
+from collections import defaultdict
+from typing import List, Optional
 from openai import OpenAI
 from dotenv import load_dotenv, find_dotenv
 from PIL import Image
@@ -12,6 +15,47 @@ from io import BytesIO
 from app.validation import validate_matrix_data, format_validation_response
 from app.matrix_types import MatrixResponse, ErrorResponse, ProcessingMethod, MatrixData
 from app.ocr_processor import process_matrix_with_ocr
+
+# Rate limiting configuration
+RATE_LIMIT_WINDOW = 60  # seconds
+MAX_REQUESTS_PER_WINDOW = 10
+rate_limit_storage = defaultdict(list)
+
+async def rate_limiter(request: Request):
+    """Rate limiting dependency"""
+    now = time.time()
+    client_ip = "default"  # In production, get this from request
+    trace_id = request.headers.get("X-Trace-ID", "unknown")
+    
+    # Clean old requests
+    rate_limit_storage[client_ip] = [
+        req_time for req_time in rate_limit_storage[client_ip]
+        if now - req_time < RATE_LIMIT_WINDOW
+    ]
+    
+    # Check rate limit
+    if len(rate_limit_storage[client_ip]) >= MAX_REQUESTS_PER_WINDOW:
+        return JSONResponse(
+            status_code=429,
+            content={
+                "status": "error",
+                "error": {
+                    "code": "RATE_LIMIT_EXCEEDED",
+                    "message": "Rate limit exceeded. Please try again later.",
+                    "details": {
+                        "error_type": "RateLimitError",
+                        "window_seconds": RATE_LIMIT_WINDOW,
+                        "max_requests": MAX_REQUESTS_PER_WINDOW,
+                        "retry_after": RATE_LIMIT_WINDOW
+                    }
+                },
+                "trace_id": trace_id
+            }
+        )
+    
+    # Add current request
+    rate_limit_storage[client_ip].append(now)
+    return True
 
 # Configure logging
 logging.basicConfig(
@@ -42,8 +86,27 @@ app.add_middleware(
     allow_headers=["*"],  # Allows all headers
 )
 
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    trace_id = request.headers.get("X-Trace-ID", "unknown")
+    return JSONResponse(
+        status_code=400,
+        content={
+            "status": "error",
+            "error": {
+                "code": "VALIDATION_ERROR",
+                "message": "Request validation failed",
+                "details": {
+                    "error_type": "ValidationError",
+                    "errors": exc.errors()
+                }
+            },
+            "trace_id": trace_id
+        }
+    )
+
 @app.get("/")
-async def root():
+async def root(rate_limit: bool = Depends(rate_limiter)):
     return {
         "message": "Insurance Matrix Processor API",
         "version": "1.0.0",
@@ -69,7 +132,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 @app.get("/healthz")
-async def healthz():
+async def healthz(rate_limit: bool = Depends(rate_limiter)):
     try:
         # Test OpenAI client initialization
         if not client.api_key:
@@ -219,7 +282,10 @@ async def healthz():
         }
 
 @app.post("/api/process-matrix", response_model=MatrixResponse)
-async def process_matrix(file: UploadFile = File(...)):
+async def process_matrix(
+    file: UploadFile = File(...),
+    rate_limit: bool = Depends(rate_limiter)
+):
     """
     Process an uploaded matrix image using OCR and GPT-4 Vision analysis.
     
