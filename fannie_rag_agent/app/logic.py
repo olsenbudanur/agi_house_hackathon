@@ -1,28 +1,82 @@
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
-import mysql.connector
+import pymysql
+import pymysql.cursors
 import fitz  # PyMuPDF
 import aiohttp
 import json
 import os
+import logging
 from typing import List, Dict
 
-# Environment variables
-OPENAI_API_KEY = "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"
-DB_HOST = "svc-17a93717-cca1-4255-b279-4e2be1f55cab-dml.aws-virginia-8.svc.singlestore.com"
-DB_PASS = "8GZttiDd80q4TUfu5KAuosRZFmVzxXHF"
-DB_USER = "admin"
-DB_NAME = "myvectortable"
+# Configure logging
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
 
+# Configure PyMySQL to handle JSON arrays
+pymysql.converters.encoders[list] = pymysql.converters.escape_string
+
+# Load environment variables with validation
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+DB_HOST = os.getenv("DB_HOST")
+DB_PASS = os.getenv("DB_PASS")
+DB_USER = os.getenv("DB_USER", "admin")
+DB_NAME = os.getenv("DB_NAME", "myvectortable")
+
+# Validate required environment variables
+required_vars = ["OPENAI_API_KEY", "DB_HOST", "DB_PASS"]
+missing_vars = [var for var in required_vars if not os.getenv(var)]
+if missing_vars:
+    raise ValueError(f"Missing required environment variables: {', '.join(missing_vars)}")
+
+# Initialize FastAPI app
 app = FastAPI()
 
 async def get_db_connection():
-    return mysql.connector.connect(
-        host=DB_HOST,
-        user=DB_USER,
-        password=DB_PASS,
-        database=DB_NAME
-    )
+    """Get a database connection with proper error handling"""
+    try:
+        # Match JavaScript implementation's connection pattern exactly
+        conn = pymysql.connect(
+            host=DB_HOST,
+            user=DB_USER,
+            password=DB_PASS,
+            database=DB_NAME,
+            cursorclass=pymysql.cursors.DictCursor,
+            # Minimal SSL config like Node.js mysql
+            ssl={},
+            charset='utf8mb4'
+        )
+        
+        # Test connection immediately like Node.js implementation
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1")
+        result = cursor.fetchone()
+        if not result or not result.get('1'):
+            raise pymysql.Error("Connection test failed")
+        cursor.close()
+        
+        print('Connected to SingleStore database successfully')
+        return conn
+        
+    except pymysql.Error as e:
+        print(f"Error connecting to database: {str(e)}")
+        # Match Node.js error handling pattern
+        if isinstance(e, pymysql.OperationalError):
+            print("Connection error - check network and credentials")
+        if conn:
+            try:
+                conn.close()
+            except:
+                pass
+        raise
+    except Exception as e:
+        print(f"Unexpected error while connecting to database: {str(e)}")
+        if conn:
+            try:
+                conn.close()
+            except:
+                pass
+        raise
 
 async def pdf_to_text(path: str) -> str:
     doc = fitz.open(path)
@@ -72,16 +126,35 @@ async def embed_chunks(chunks: List[str]) -> List:
     return embeddings
 
 async def upload_embeddings_to_database(embeddings: List, chunks: List[str]):
-    conn = await get_db_connection()
-    cursor = conn.cursor()
-    
-    for chunk, embedding in zip(chunks, embeddings):
-        query = "INSERT INTO myvectortable (text, vector) VALUES (%s, JSON_ARRAY_PACK(%s));"
-        cursor.execute(query, (chunk, json.dumps(embedding)))
-    
-    conn.commit()
-    cursor.close()
-    conn.close()
+    """Upload embeddings to database with proper connection management"""
+    conn = None
+    cursor = None
+    try:
+        conn = await get_db_connection()
+        cursor = conn.cursor()
+        
+        for chunk, embedding in zip(chunks, embeddings):
+            query = "INSERT INTO myvectortable (text, vector) VALUES (%s, JSON_ARRAY_PACK(%s));"
+            cursor.execute(query, (chunk, json.dumps(embedding)))
+        
+        conn.commit()
+        return {"message": "Upload succeeded"}
+        
+    except pymysql.Error as db_err:
+        print(f"Database error in upload: {str(db_err)}")
+        if conn:
+            conn.rollback()
+        raise
+    except Exception as e:
+        print(f"Error in upload: {str(e)}")
+        if conn:
+            conn.rollback()
+        raise
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
 
 @app.get("/")
 async def root():
@@ -89,13 +162,34 @@ async def root():
 
 @app.get("/resetDatabase")
 async def reset_database():
-    conn = await get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM myvectortable;")
-    conn.commit()
-    cursor.close()
-    conn.close()
-    return {"message": "Database reset successful"}
+    """Reset the database with proper connection management"""
+    conn = None
+    cursor = None
+    try:
+        conn = await get_db_connection()
+        if not conn.is_connected():
+            raise mysql.connector.Error("Failed to establish database connection")
+            
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM myvectortable;")
+        conn.commit()
+        return {"message": "Database reset successful"}
+        
+    except mysql.connector.Error as db_err:
+        print(f"Database error in reset: {str(db_err)}")
+        if conn and conn.is_connected():
+            conn.rollback()
+        raise
+    except Exception as e:
+        print(f"Error in reset: {str(e)}")
+        if conn and conn.is_connected():
+            conn.rollback()
+        raise
+    finally:
+        if cursor:
+            cursor.close()
+        if conn and conn.is_connected():
+            conn.close()
 
 @app.get("/uploadDataDir")
 async def upload_data_dir():
@@ -105,32 +199,46 @@ async def upload_data_dir():
     await upload_embeddings_to_database(embeddings, chunks)
     return {"message": "Upload succeeded"}
 
-async def query(query_text: str):
-    """Execute a query against the RAG system"""
+async def query(query_text: str, count: int = 3):
+    """Execute a query against the RAG system and return standardized results"""
+    conn = None
+    cursor = None
     try:
+        # Get embedding for query
         embedding_response = await embed(query_text)
+        embedding_json = json.dumps(embedding_response['data'][0]['embedding'])
         
+        # Connect to database
         conn = await get_db_connection()
-        cursor = conn.cursor(dictionary=True)
+        cursor = conn.cursor()
         
+        # Match JavaScript implementation's query format exactly
         query = f"""
         SELECT text, dot_product(vector, JSON_ARRAY_PACK(%s)) AS score 
         FROM myvectortable 
         ORDER BY score DESC 
-        LIMIT 3;
+        LIMIT {count};
         """
-        cursor.execute(query, (json.dumps(embedding_response['data'][0]['embedding']),))
+        cursor.execute(query, (embedding_json,))
         results = cursor.fetchall()
         
-        cursor.close()
-        conn.close()
-        
         if not results:
-            return [{"text": "No relevant information found", "score": 0}]
-        return results
+            return [{"text": "No relevant information found", "score": 0.0}]
+            
+        # Standardize response format to match JavaScript implementation exactly
+        return [{"text": str(row["text"]), "score": float(row["score"])} for row in results]
+        
+    except pymysql.Error as db_err:
+        print(f"Database error in query function: {str(db_err)}")
+        return [{"text": "Database connection error", "score": 0.0}]
     except Exception as e:
         print(f"Error in query function: {str(e)}")
-        return [{"text": "Error occurred while processing query", "score": 0}]
+        return [{"text": "Error occurred while processing query", "score": 0.0}]
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
 
 async def chat(messages: List[Dict[str, str]]):
     """Execute a chat interaction with the RAG system"""

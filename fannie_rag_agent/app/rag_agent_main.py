@@ -36,7 +36,7 @@ import jsonschema
 import json
 import aiohttp
 import os
-from .models import (
+from models import (
     AgentStatus,
     HealthCheck,
     AgentCapabilities,
@@ -44,7 +44,7 @@ from .models import (
     InvocationResponse,
     ErrorDetails
 )
-from .logic import (
+from logic import (
     get_db_connection,
     embed,
     query as rag_query,
@@ -191,20 +191,80 @@ async def health_check(
     rate_limit: bool = Depends(rate_limiter),
     api_key: str = Depends(verify_api_key)
 ) -> HealthCheck:
-    """Health check endpoint"""
-    # TODO: Implement real metrics collection
-    return HealthCheck(
-        status=AgentStatus.HEALTHY,
-        last_updated=datetime.utcnow(),
-        metrics={
+    """Health check endpoint that matches JavaScript implementation pattern"""
+    try:
+        # Initialize metrics with default values
+        metrics = {
             "uptime": 100.0,  # Mock value, should be calculated from start time
             "success_rate": 0.99,  # Mock value, should track actual success/failure
             "average_response_time": 0.2,  # Mock value, should be measured
             "total_queries": 0.0,  # Mock value, should be tracked
             "total_chats": 0.0,  # Mock value, should be tracked
-            "database_connection_status": 1.0  # Mock value, should check DB connection
+            "database_connection_status": 0.0,
+            "database_row_count": 0.0
         }
-    )
+
+        # Test database connection using same pattern as JavaScript
+        conn = None
+        cursor = None
+        try:
+            # Simple connection test first, like JavaScript
+            conn = await get_db_connection()
+            cursor = conn.cursor()
+            
+            # Test basic connectivity first
+            cursor.execute("SELECT 1")
+            if cursor.fetchone():
+                logger.info("Basic database connectivity test passed")
+                
+                # If basic test passes, check table
+                cursor.execute("SELECT COUNT(*) as count FROM myvectortable")
+                result = cursor.fetchone()
+                metrics["database_row_count"] = float(result["count"]) if result and "count" in result else 0.0
+                metrics["database_connection_status"] = 1.0
+                logger.info("Database health check successful")
+            
+        except Exception as db_err:
+            logger.error(f"Database health check failed: {str(db_err)}")
+            # Keep default 0.0 status for database metrics
+            
+        finally:
+            # Ensure connections are properly closed
+            if cursor:
+                try:
+                    cursor.close()
+                except Exception as e:
+                    logger.error(f"Error closing cursor: {str(e)}")
+            if conn:
+                try:
+                    conn.close()
+                except Exception as e:
+                    logger.error(f"Error closing connection: {str(e)}")
+
+        # Determine status based on database connectivity
+        status = AgentStatus.HEALTHY if metrics["database_connection_status"] == 1.0 else AgentStatus.DEGRADED
+        
+        return HealthCheck(
+            status=status,
+            last_updated=datetime.utcnow(),
+            metrics=metrics
+        )
+        
+    except Exception as e:
+        logger.error(f"Health check failed: {str(e)}")
+        return HealthCheck(
+            status=AgentStatus.UNHEALTHY,
+            last_updated=datetime.utcnow(),
+            metrics={
+                "uptime": 0.0,
+                "success_rate": 0.0,
+                "average_response_time": 0.0,
+                "total_queries": 0.0,
+                "total_chats": 0.0,
+                "database_connection_status": 0.0,
+                "database_row_count": 0.0
+            }
+        )
 
 @app.get("/capabilities")
 async def get_capabilities(
@@ -292,7 +352,8 @@ async def invoke_agent(
             # Call the existing query function from logic.py
             try:
                 results = await rag_query(query_text)
-                if not results:
+                # Format raw query results into agent interface response
+                if not results or len(results) == 0:
                     return InvocationResponse(
                         status="success",
                         result={
@@ -302,12 +363,15 @@ async def invoke_agent(
                         },
                         trace_id=request.trace_id
                     )
+                
+                # Use the highest scoring result as the answer and remaining as context
+                sorted_results = sorted(results, key=lambda x: float(x["score"]), reverse=True)
                 return InvocationResponse(
                     status="success",
                     result={
-                        "answer": results[0]["text"],
-                        "context": [r["text"] for r in results[1:]] if len(results) > 1 else [],
-                        "confidence": float(results[0]["score"]) if "score" in results[0] else 0.9
+                        "answer": sorted_results[0]["text"],
+                        "context": [r["text"] for r in sorted_results[1:]] if len(sorted_results) > 1 else [],
+                        "confidence": float(sorted_results[0]["score"])
                     },
                     trace_id=request.trace_id
                 )
