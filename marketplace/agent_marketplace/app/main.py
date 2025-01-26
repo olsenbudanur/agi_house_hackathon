@@ -21,7 +21,7 @@ app = FastAPI(
 # Configure CORS for production
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://ai-agent-marketplace-9z6l1gh1.devinapps.com"],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
