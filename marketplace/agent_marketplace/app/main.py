@@ -12,6 +12,7 @@ logging.basicConfig(
 app = FastAPI(
     title="AI Agent Marketplace",
     version="1.0.0",
+    root_path="/api/v1",
     openapi_url="/openapi.json",
     docs_url="/docs",
     redoc_url="/redoc"
@@ -20,9 +21,9 @@ app = FastAPI(
 # Configure CORS for local development
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins for local development
+    allow_origins=["http://localhost:5173"],  # Frontend development server
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
     expose_headers=["*"]
 )

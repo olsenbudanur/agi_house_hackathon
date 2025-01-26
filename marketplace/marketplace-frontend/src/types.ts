@@ -10,8 +10,7 @@ export interface Agent {
     burst_limit: number
   }
   status?: 'healthy' | 'degraded' | 'unhealthy'
-  health_check_endpoint: string
-  invocation_endpoint: string
+  base_url: string  // Base URL for the agent
   provider_details: ProviderDetails
   agent_id: string
   registration_timestamp?: string
@@ -30,8 +29,7 @@ export interface AgentRegistration {
   capabilities: string[]
   input_schema: Record<string, any>
   output_schema: Record<string, any>
-  health_check_endpoint: string
-  invocation_endpoint: string
+  base_url: string  // Base URL from which we'll derive /capabilities, /health, and /invoke endpoints
   provider_details: ProviderDetails
 }
 

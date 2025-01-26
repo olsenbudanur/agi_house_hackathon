@@ -35,9 +35,13 @@ export async function listAgents(): Promise<Agent[]> {
 
 export async function semanticSearch(query: string, threshold: number = 0.3): Promise<Agent[]> {
   try {
-    const response = await fetch(
-      `${API_URL}/agents/search?query=${encodeURIComponent(query)}&threshold=${threshold}`
-    )
+    const url = `${API_URL}/agents/search?query=${encodeURIComponent(query)}&threshold=${threshold}`
+    console.log('Making semantic search request to:', url)
+    const response = await fetch(url, {
+      headers: {
+        'Accept': 'application/json',
+      }
+    })
     if (!response.ok) {
       throw new Error(`HTTP error! status: ${response.status}`)
     }

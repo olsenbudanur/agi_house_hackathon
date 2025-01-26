@@ -54,9 +54,15 @@ export function AgentList() {
     try {
       setIsSearching(true)
       setError(null)
-      const results = semanticMode
-        ? await semanticSearch(query)
-        : agents.filter(agent => {
+      console.log('Performing search:', { query, semanticMode })
+      let results;
+      let searchResults;
+      if (semanticMode) {
+        console.log('Performing semantic search...');
+        searchResults = await semanticSearch(query);
+        console.log('Semantic search results:', searchResults);
+      } else {
+        searchResults = agents.filter(agent => {
             const searchTermLower = query.toLowerCase()
             return (
               (agent.name?.toLowerCase() || '').includes(searchTermLower) ||
@@ -66,7 +72,8 @@ export function AgentList() {
               )
             )
           })
-      setAgents(results)
+      }
+      setAgents(searchResults)
     } catch (error) {
       const errorMessage = error instanceof Error 
         ? `Search failed: ${error.message}`
