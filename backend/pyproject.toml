@@ -18,6 +18,8 @@ opencv-python-headless = "^4.11.0.86"
 numpy = "^1.26.3"
 uvicorn = {extras = ["standard"], version = "^0.27.0"}
 pdf2image = "^1.17.0"
+pytest = "^8.0.0"
+httpx = "^0.26.0"  # For TestClient in FastAPI tests
 
 
 [tool.poetry.group.dev.dependencies]

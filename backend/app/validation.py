@@ -37,10 +37,10 @@ def validate_dti(dti: float) -> bool:
     """Validate Debt-to-Income ratio."""
     return 0 <= dti <= 100
 
-def validate_matrix_data(data: Dict) -> Tuple[List[str], List[str]]:
+def validate_matrix_data(data: Dict) -> Tuple[List[str], List[str], Dict[str, float]]:
     """
     Validates the extracted matrix data against known rules and patterns.
-    Returns a tuple of (errors, warnings).
+    Returns a tuple of (errors, warnings, confidence_scores).
     """
     errors = []
     warnings = []
