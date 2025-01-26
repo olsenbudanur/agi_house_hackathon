@@ -1,6 +1,4 @@
-from typing import Dict, List, Union, Optional
-
-from typing import Dict, List, Tuple, Union
+from typing import Dict, List, Tuple, Union, Optional
 from .matrix_types import MatrixData, ValidationResult
 
 def validate_ltv(ltv: str) -> bool:
@@ -63,6 +61,34 @@ def validate_matrix_data(data: Dict) -> Tuple[List[str], List[str]]:
         # Convert dict to MatrixData model for validation
         matrix_data = MatrixData(**data)
         
+        # Validate LTV requirements
+        if hasattr(matrix_data, "ltv_requirements"):
+            for prop_type in ["primary_residence", "second_home", "investment"]:
+                if hasattr(matrix_data.ltv_requirements, prop_type):
+                    prop_reqs = getattr(matrix_data.ltv_requirements, prop_type)
+                    for loan_type in ["purchase", "rate_and_term", "cash_out"]:
+                        if hasattr(prop_reqs, loan_type):
+                            loan_reqs = getattr(prop_reqs, loan_type)
+                            total_checks += 3  # LTV, FICO, loan amount
+                            
+                            if validate_ltv(loan_reqs.max_ltv):
+                                passed_checks += 1
+                                confidence_scores["ltv_values"] += 0.111
+                            else:
+                                errors.append(f"Invalid LTV for {prop_type}/{loan_type}: {loan_reqs.max_ltv}")
+                            
+                            if validate_fico(loan_reqs.min_fico):
+                                passed_checks += 1
+                                confidence_scores["fico_scores"] += 0.111
+                            else:
+                                errors.append(f"Invalid FICO for {prop_type}/{loan_type}: {loan_reqs.min_fico}")
+                            
+                            if validate_loan_amount(loan_reqs.max_loan):
+                                passed_checks += 1
+                                confidence_scores["loan_amounts"] += 0.111
+                            else:
+                                errors.append(f"Invalid loan amount for {prop_type}/{loan_type}: {loan_reqs.max_loan}")
+        
         # Validate geographic restrictions
         if matrix_data.property_requirements and matrix_data.property_requirements.geographic_restrictions:
             total_checks += 1
@@ -112,7 +138,23 @@ def validate_matrix_data(data: Dict) -> Tuple[List[str], List[str]]:
                         try:
                             amount = float(loan_amount.replace("$", "").replace(",", ""))
                             if amount > 1000000 and "12" not in str(reserves):
-                                warnings.append("Loan amount exceeds $1M but 12-month reserves not explicitly specified")</old_str>
+                                warnings.append("Loan amount exceeds $1M but 12-month reserves not explicitly specified")
+                        except (ValueError, AttributeError):
+                            warnings.append("Could not validate loan amount for reserve requirements")
+        
+        # Calculate overall confidence
+        if total_checks > 0:
+            confidence_scores["overall"] = passed_checks / total_checks
+            
+        # Add confidence warnings
+        for metric, score in confidence_scores.items():
+            if score < 0.7:  # Less than 70% confidence
+                warnings.append(f"Low confidence in {metric} detection: {score:.1%}")
+                
+    except Exception as e:
+        errors.append(f"Validation error: {str(e)}")
+        
+    return errors, warnings</old_str>
 <new_str>def validate_matrix_data(data: Dict) -> Tuple[List[str], List[str]]:
     """
     Validates the extracted matrix data against known rules and patterns.
@@ -350,7 +392,10 @@ def format_validation_response(data: Dict, errors: List[str], warnings: List[str
     confidence = {
         "ltv_values": 1.0 if not any("LTV" in err for err in errors) else 0.5,
         "fico_scores": 1.0 if not any("FICO" in err for err in errors) else 0.5,
-        "loan_amounts": 1.0 if not any("loan amount" in err for err in errors) else 0.5
+        "loan_amounts": 1.0 if not any("loan amount" in err for err in errors) else 0.5,
+        "geographic_restrictions": 1.0 if not any("geographic" in err.lower() for err in errors) else 0.5,
+        "reserve_requirements": 1.0 if not any("reserve" in err.lower() for err in errors) else 0.5,
+        "matrix_structure": 1.0 if not any("structure" in err.lower() for err in errors) else 0.5
     }
     
     # Overall confidence is the average of individual scores
