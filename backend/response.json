@@ -1,0 +1,1 @@
+{"error":"Processing Error","details":{"message":"Failed to process the matrix image","error":"Matrix processing failed: Tesseract installation verification failed","suggestion":"Please ensure the image is clear and contains a valid guideline matrix"}}
