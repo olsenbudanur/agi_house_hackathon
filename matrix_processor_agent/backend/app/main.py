@@ -13,8 +13,22 @@ from dotenv import load_dotenv, find_dotenv
 from PIL import Image
 from io import BytesIO
 from app.validation import validate_matrix_data, format_validation_response
-from app.matrix_types import MatrixResponse, ErrorResponse, ProcessingMethod, MatrixData
+from app.matrix_types import (
+    MatrixResponse, ErrorResponse, ProcessingMethod, MatrixData,
+    AgentStatus, HealthCheck
+)
 from app.ocr_processor import process_matrix_with_ocr
+import time
+
+# Global start time for uptime calculation
+START_TIME = time.time()
+
+# Global success/failure counters for metrics
+request_counts = {
+    "success": 0,
+    "total": 0,
+    "response_times": []
+}
 
 # Rate limiting configuration
 RATE_LIMIT_WINDOW = 60  # seconds
@@ -130,6 +144,76 @@ logging.basicConfig(
     stream=sys.stdout
 )
 logger = logging.getLogger(__name__)
+
+@app.get("/health")
+async def health_check(rate_limit: bool = Depends(rate_limiter)) -> HealthCheck:
+    """Health check endpoint for the marketplace."""
+    # Calculate metrics
+    uptime = int(time.time() - START_TIME)
+    success_rate = request_counts["success"] / request_counts["total"] if request_counts["total"] > 0 else 1.0
+    avg_response_time = (
+        sum(request_counts["response_times"]) / len(request_counts["response_times"])
+        if request_counts["response_times"]
+        else 0.0
+    )
+
+    try:
+        # Test OpenAI API
+        if not client.api_key:
+            return HealthCheck(
+                status=AgentStatus.UNHEALTHY,
+                last_updated=datetime.datetime.utcnow(),
+                metrics={
+                    "uptime": uptime,
+                    "success_rate": success_rate,
+                    "average_response_time": avg_response_time
+                }
+            )
+        
+        # Test OpenAI connectivity
+        client.models.list()
+        
+        # Test Tesseract
+        import subprocess
+        tesseract_cmd = None
+        for path in ['/usr/local/bin/tesseract', '/usr/bin/tesseract', 'tesseract']:
+            if path and (os.path.exists(path) or subprocess.run(['which', path], capture_output=True).returncode == 0):
+                tesseract_cmd = path
+                break
+        
+        if not tesseract_cmd:
+            return HealthCheck(
+                status=AgentStatus.DEGRADED,
+                last_updated=datetime.datetime.utcnow(),
+                metrics={
+                    "uptime": uptime,
+                    "success_rate": success_rate,
+                    "average_response_time": avg_response_time
+                }
+            )
+        
+        # All checks passed
+        return HealthCheck(
+            status=AgentStatus.HEALTHY,
+            last_updated=datetime.datetime.utcnow(),
+            metrics={
+                "uptime": uptime,
+                "success_rate": success_rate,
+                "average_response_time": avg_response_time
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"Health check failed: {str(e)}")
+        return HealthCheck(
+            status=AgentStatus.UNHEALTHY,
+            last_updated=datetime.datetime.utcnow(),
+            metrics={
+                "uptime": uptime,
+                "success_rate": success_rate,
+                "average_response_time": avg_response_time
+            }
+        )
 
 @app.get("/healthz")
 async def healthz(rate_limit: bool = Depends(rate_limiter)):
@@ -286,6 +370,10 @@ async def process_matrix(
     file: UploadFile = File(...),
     rate_limit: bool = Depends(rate_limiter)
 ):
+    """Process an uploaded matrix image using OCR and GPT-4 Vision analysis."""
+    start_time = time.time()
+    request_counts["total"] += 1
+    try:
     """
     Process an uploaded matrix image using OCR and GPT-4 Vision analysis.
     
@@ -370,6 +458,8 @@ async def process_matrix(
             }
             
             logger.info(f"Matrix processing completed successfully for {file.filename}")
+            request_counts["success"] += 1
+            request_counts["response_times"].append(time.time() - start_time)
             return JSONResponse(content=response_data)
             
         except Exception as processing_error:

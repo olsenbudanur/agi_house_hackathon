@@ -1,5 +1,19 @@
 from typing import Dict, List, Optional, Union, Any
 from pydantic import BaseModel, Field
+from enum import Enum
+from datetime import datetime
+
+class AgentStatus(str, Enum):
+    """Enum for agent health status."""
+    HEALTHY = "healthy"
+    DEGRADED = "degraded"
+    UNHEALTHY = "unhealthy"
+
+class HealthCheck(BaseModel):
+    """Model for agent health check response."""
+    status: AgentStatus
+    last_updated: datetime
+    metrics: Dict[str, float]
 
 class HeadingData(BaseModel):
     """Model for hierarchical heading data using 'heading ^ subheading' notation."""
