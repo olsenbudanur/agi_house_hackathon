@@ -1,6 +1,6 @@
 import { Agent, AgentRegistration } from '../types'
 
-const API_URL = import.meta.env.VITE_API_URL
+const API_URL = "http://localhost:8081"
 
 export interface InvocationRequest {
   input: Record<string, any>
@@ -35,13 +35,10 @@ export async function listAgents(): Promise<Agent[]> {
 
 export async function semanticSearch(query: string, threshold: number = 0.3): Promise<Agent[]> {
   try {
-    const url = `${API_URL}/agents/search?query=${encodeURIComponent(query)}&threshold=${threshold}`
-    console.log('Making semantic search request to:', url)
-    const response = await fetch(url, {
-      headers: {
-        'Accept': 'application/json',
-      }
-    })
+    console.log('doing semantic search:', query)
+    const response = await fetch(
+      `${API_URL}/agents/search?query=${encodeURIComponent(query)}&threshold=${threshold}`
+    )
     if (!response.ok) {
       throw new Error(`HTTP error! status: ${response.status}`)
     }

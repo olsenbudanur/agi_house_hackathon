@@ -4,7 +4,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { AlertCircle, RefreshCw, Search } from "lucide-react"
+import { AlertCircle, RefreshCw, Search, TrendingUp } from "lucide-react"
 import { Agent } from "../../types"
 import { listAgents, semanticSearch } from "../../lib/api"
 
@@ -51,29 +51,26 @@ export function AgentList() {
       return
     }
 
+    console.log(`Performing ${semanticMode ? 'semantic' : 'basic'} search for:`, query)
+
     try {
       setIsSearching(true)
       setError(null)
-      console.log('Performing search:', { query, semanticMode })
-      let results;
-      let searchResults;
-      if (semanticMode) {
-        console.log('Performing semantic search...');
-        searchResults = await semanticSearch(query);
-        console.log('Semantic search results:', searchResults);
-      } else {
-        searchResults = agents.filter(agent => {
-            const searchTermLower = query.toLowerCase()
-            return (
-              (agent.name?.toLowerCase() || '').includes(searchTermLower) ||
-              (agent.description?.toLowerCase() || '').includes(searchTermLower) ||
-              (agent.capabilities || []).some(cap => 
-                (cap?.toLowerCase() || '').includes(searchTermLower)
-              )
-            )
-          })
-      }
-      setAgents(searchResults)
+      setSemanticMode(true)
+      const results = await semanticSearch(query)
+        // : agents.filter(agent => {
+        //     console.log('agent:', agent)
+        //     console.log("query:", query)
+        //     const searchTermLower = query.toLowerCase()
+        //     return (
+        //       (agent.name?.toLowerCase() || '').includes(searchTermLower) ||
+        //       (agent.description?.toLowerCase() || '').includes(searchTermLower) ||
+        //       (agent.capabilities || []).some(cap => 
+        //         (cap?.toLowerCase() || '').includes(searchTermLower)
+        //       )
+        //     )
+        //   })
+      setAgents(results)
     } catch (error) {
       const errorMessage = error instanceof Error 
         ? `Search failed: ${error.message}`
@@ -136,7 +133,7 @@ export function AgentList() {
             }}
             className="pl-9"
           />
-          <Button
+          {/* <Button
             variant="ghost"
             size="sm"
             className="absolute right-2 top-2"
@@ -149,7 +146,7 @@ export function AgentList() {
             }}
           >
             {semanticMode ? "Basic Search" : "Semantic Search"}
-          </Button>
+          </Button> */}
         </div>
         <Select value={statusFilter} onValueChange={setStatusFilter}>
           <SelectTrigger className="w-48">
