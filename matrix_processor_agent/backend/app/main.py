@@ -281,6 +281,113 @@ async def get_capabilities(rate_limit: bool = Depends(rate_limiter)) -> AgentCap
         }
     )
 
+@app.post("/invoke")
+async def invoke_agent(
+    request: InvocationRequest,
+    rate_limit: bool = Depends(rate_limiter),
+    marketplace_token: Optional[str] = Header(None, alias="X-Marketplace-Token")
+) -> InvocationResponse:
+    """Invoke agent functionality endpoint for the marketplace."""
+    logger.info(f"Processing invocation request with trace_id: {request.trace_id}")
+    
+    # Validate marketplace token
+    if not marketplace_token or not marketplace_token.strip():
+        return InvocationResponse(
+            status="error",
+            error=ErrorDetails(
+                code="INVALID_TOKEN",
+                message="Missing or invalid marketplace token",
+                details={"error_type": "AuthenticationError"}
+            ),
+            trace_id=request.trace_id
+        )
+    
+    # Extract and validate file_url
+    file_url = request.input.get("file_url")
+    if not file_url:
+        return InvocationResponse(
+            status="error",
+            error=ErrorDetails(
+                code="INVALID_INPUT",
+                message="file_url is required in input",
+                details={
+                    "error_type": "ValidationError",
+                    "required_fields": ["file_url"]
+                }
+            ),
+            trace_id=request.trace_id
+        )
+    
+    try:
+        # Download file from URL
+        import httpx
+        async with httpx.AsyncClient() as client:
+            response = await client.get(file_url, timeout=request.timeout or 30)
+            response.raise_for_status()
+            content_type = response.headers.get("content-type", "").lower()
+            contents = response.content
+            
+            # Process the matrix using our existing OCR logic
+            matrix_data, validation_errors, validation_warnings = await process_matrix_with_ocr(contents, content_type)
+            
+            # Return successful response
+            return InvocationResponse(
+                status="success",
+                result={
+                    "data": matrix_data,
+                    "validation": {
+                        "errors": validation_errors,
+                        "warnings": validation_warnings
+                    },
+                    "processing_info": {
+                        "content_type": content_type,
+                        "file_size": len(contents)
+                    }
+                },
+                trace_id=request.trace_id
+            )
+            
+    except httpx.TimeoutException:
+        return InvocationResponse(
+            status="error",
+            error=ErrorDetails(
+                code="TIMEOUT",
+                message="Request timed out while downloading file",
+                details={
+                    "error_type": "TimeoutError",
+                    "timeout_seconds": request.timeout or 30
+                }
+            ),
+            trace_id=request.trace_id
+        )
+    except httpx.HTTPError as e:
+        return InvocationResponse(
+            status="error",
+            error=ErrorDetails(
+                code="DOWNLOAD_ERROR",
+                message=f"Failed to download file: {str(e)}",
+                details={
+                    "error_type": "HTTPError",
+                    "status_code": e.response.status_code if hasattr(e, 'response') else None
+                }
+            ),
+            trace_id=request.trace_id
+        )
+    except Exception as e:
+        logger.error(f"Error processing request: {str(e)}")
+        return InvocationResponse(
+            status="error",
+            error=ErrorDetails(
+                code="PROCESSING_ERROR",
+                message="Error processing matrix file",
+                details={
+                    "error_type": type(e).__name__,
+                    "error_message": str(e)
+                }
+            ),
+            trace_id=request.trace_id
+        )
+
 @app.get("/healthz")
 async def healthz(rate_limit: bool = Depends(rate_limiter)):
     try:

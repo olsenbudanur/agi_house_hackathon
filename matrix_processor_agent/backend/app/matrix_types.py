@@ -24,6 +24,26 @@ class AgentCapabilities(BaseModel):
     output_schema: Dict[str, Any]
     rate_limits: Dict[str, int]
 
+class InvocationRequest(BaseModel):
+    """Model for agent invocation request."""
+    input: Dict[str, Any]
+    callback_url: Optional[str] = None
+    timeout: Optional[int] = 30
+    trace_id: str
+
+class ErrorDetails(BaseModel):
+    """Model for error details in responses."""
+    code: str
+    message: str
+    details: Dict[str, Any]
+
+class InvocationResponse(BaseModel):
+    """Model for agent invocation response."""
+    status: str  # "success" | "error" | "pending"
+    result: Optional[Dict[str, Any]] = None
+    error: Optional[ErrorDetails] = None
+    trace_id: str
+
 class HeadingData(BaseModel):
     """Model for hierarchical heading data using 'heading ^ subheading' notation."""
     heading: str
