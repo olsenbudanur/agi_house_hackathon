@@ -1,6 +1,8 @@
 from fastapi import APIRouter, HTTPException, Header, Query
 from typing import List, Optional, Tuple
 import numpy as np
+import os
+import openai
 from ..models import (
     AgentRegistration, 
     AgentResponse, 
@@ -9,13 +11,19 @@ from ..models import (
     AgentStatus, 
     ProviderDetails,
     InvocationRequest,
-    InvocationResponse
+    InvocationResponse,
+    UniversalAgentRequest
 )
 from ..services.embedding import model as embedding_model
 from ..database import db
 from ..services.embedding import compute_agent_embedding
 from datetime import datetime
 import logging
+
+# Configure OpenAI API key from environment
+openai.api_key = os.getenv("OPENAI_API_KEY")
+if not openai.api_key:
+    logger.warning("OPENAI_API_KEY environment variable not set. find-and-invoke endpoint will not work.")
 
 logger = logging.getLogger(__name__)
 
@@ -360,4 +368,260 @@ async def invoke_agent(
                 }
             },
             trace_id=request.trace_id
+        )
+
+@router.post("/find-and-invoke", response_model=InvocationResponse)
+async def find_and_invoke_agent(request: UniversalAgentRequest):
+    """Find the most suitable agent for the given query and invoke it."""
+    from logging import getLogger
+    import openai
+    import uuid
+    from jsonschema import validate, ValidationError
+    
+    logger = getLogger(__name__)
+    
+    try:
+        # Load all agents in the database
+        agents = db.list_agents()
+        if not agents:
+            raise HTTPException(
+                status_code=404,
+                detail="No agents available in the marketplace"
+            )
+        
+        # Create a system prompt to find the most suitable agent
+        prompt = "You are an AI agent selector tasked with matching user queries to the most appropriate agent and formatting their input correctly. Your task is to:\n"
+        prompt += "1. Carefully analyze the user's query to understand their intent\n"
+        prompt += "2. Select the most suitable agent based on capabilities and requirements\n"
+        prompt += "3. Extract or infer required parameters from the query to match the agent's input schema\n"
+        prompt += "4. Format the input exactly according to the schema, ensuring all required fields are present\n\n"
+        
+        prompt += "Available agents:\n"
+        for agent in agents:
+            prompt += f"- Name: {agent['agent_name']}\n"
+            prompt += f"  Description: {agent['description']}\n"
+            prompt += f"  Capabilities: {', '.join(agent['capabilities'])}\n"
+            prompt += f"  Input Schema (MUST MATCH EXACTLY):\n"
+            
+            # Pretty print the schema with indentation for clarity
+            import json
+            schema_str = json.dumps(agent['input_schema'], indent=4)
+            # Add indentation to each line
+            schema_lines = [f"    {line}" for line in schema_str.split("\n")]
+            prompt += "\n".join(schema_lines) + "\n\n"
+        
+        # Add user query and context
+        prompt += f"\nUser Query: {request.query}\n"
+        if request.additional_context:
+            prompt += f"Additional Context: {request.additional_context}\n"
+        
+        prompt += "\nIMPORTANT: You must respond in the following JSON format:\n"
+        prompt += "{\n"
+        prompt += '  "selected_agent": "exact_name_of_selected_agent",\n'
+        prompt += '  "reason": "detailed explanation of why this agent was selected and how it matches the user\'s needs",\n'
+        prompt += '  "confidence": "high/medium/low - how confident you are in this selection",\n'
+        prompt += '  "input_parameters": { parameters exactly matching the agent\'s input schema }\n'
+        prompt += "}\n\n"
+        prompt += "Rules:\n"
+        prompt += "1. The selected_agent MUST exactly match one of the provided agent names\n"
+        prompt += "2. The input_parameters MUST exactly match the schema of the selected agent\n"
+        prompt += "3. If you cannot find a suitable agent, respond with {\"error\": \"No suitable agent found\"}\n"
+        prompt += "4. If you cannot construct valid input parameters, respond with {\"error\": \"Cannot construct valid input\"}\n"
+        
+        # Call OpenAI API
+        response = openai.ChatCompletion.create(
+            model="gpt-4",
+            messages=[
+                {"role": "system", "content": prompt}
+            ],
+            temperature=request.temperature,
+            max_tokens=request.max_tokens
+        )
+        
+        # Parse OpenAI response
+        try:
+            import json
+            selection = json.loads(response.choices[0].message.content)
+            
+            # Check for error responses from the LLM
+            if "error" in selection:
+                raise HTTPException(
+                    status_code=400,
+                    detail=selection["error"]
+                )
+            
+            # Extract required fields
+            selected_agent_name = selection.get("selected_agent")
+            input_parameters = selection.get("input_parameters")
+            confidence = selection.get("confidence", "low")
+            reason = selection.get("reason", "No reason provided")
+            
+            if not selected_agent_name or not input_parameters:
+                raise ValueError("Missing required fields in LLM response")
+            
+            # Log the selection details
+            logger.info(f"Selected agent: {selected_agent_name}")
+            logger.info(f"Selection confidence: {confidence}")
+            logger.info(f"Selection reason: {reason}")
+            
+            # Find the selected agent
+            selected_agent = next(
+                (a for a in agents if a["agent_name"] == selected_agent_name),
+                None
+            )
+            
+            if not selected_agent:
+                raise ValueError(f"Selected agent '{selected_agent_name}' not found")
+            
+            # Extract and validate schema
+            input_schema = selected_agent["input_schema"]
+            logger.debug(f"Agent input schema: {json.dumps(input_schema, indent=2)}")
+            
+            # Pre-validation checks
+            if not isinstance(input_parameters, dict):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Generated input parameters must be a JSON object"
+                )
+            
+            # Check for required fields before validation
+            if "required" in input_schema:
+                missing_fields = [
+                    field for field in input_schema["required"]
+                    if field not in input_parameters
+                ]
+                if missing_fields:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Missing required fields: {', '.join(missing_fields)}"
+                    )
+            
+            # Full schema validation
+            try:
+                validate(instance=input_parameters, schema=input_schema)
+                logger.info("Input parameters validated successfully")
+                
+                # Log the matched fields for debugging
+                if "properties" in input_schema:
+                    matched_fields = {
+                        field: input_parameters.get(field)
+                        for field in input_schema["properties"]
+                        if field in input_parameters
+                    }
+                    logger.debug(f"Matched fields: {json.dumps(matched_fields, indent=2)}")
+                
+            except ValidationError as e:
+                logger.error(f"Schema validation failed: {str(e)}")
+                # Enhanced error message with schema comparison
+                error_detail = {
+                    "message": "Generated input parameters do not match agent schema",
+                    "validation_error": str(e),
+                    "received_parameters": input_parameters,
+                    "expected_schema": input_schema
+                }
+                raise HTTPException(
+                    status_code=400,
+                    detail=error_detail
+                )
+            
+            # Prepare invocation context
+            trace_id = str(uuid.uuid4())
+            timeout = min(request.timeout or 30, 300)  # Cap at 5 minutes
+            
+            # Create invocation request with metadata
+            invoke_request = InvocationRequest(
+                input=input_parameters,
+                trace_id=trace_id,
+                timeout=timeout
+            )
+            
+            # Log the invocation details
+            logger.info(f"Invoking agent: {selected_agent['agent_name']} (ID: {selected_agent['agent_id']})")
+            logger.info(f"Trace ID: {trace_id}")
+            logger.info(f"Confidence level: {confidence}")
+            logger.info(f"Selection reason: {reason}")
+            logger.debug(f"Input parameters: {json.dumps(input_parameters, indent=2)}")
+            
+            try:
+                # Invoke the selected agent
+                response = await invoke_agent(
+                    agent_id=selected_agent["agent_id"],
+                    request=invoke_request
+                )
+                
+                # Add context to successful response
+                if response.status == "success":
+                    if not response.result:
+                        response.result = {}
+                    response.result.update({
+                        "_agent_selection_metadata": {
+                            "selected_agent": selected_agent_name,
+                            "confidence": confidence,
+                            "reason": reason
+                        }
+                    })
+                
+                return response
+                
+            except Exception as e:
+                logger.error(f"Agent invocation failed: {str(e)}")
+                return InvocationResponse(
+                    status="error",
+                    error={
+                        "code": "INVOCATION_ERROR",
+                        "message": "Failed to invoke selected agent",
+                        "details": {
+                            "error_type": type(e).__name__,
+                            "error_message": str(e),
+                            "selected_agent": selected_agent_name,
+                            "confidence": confidence,
+                            "reason": reason
+                        }
+                    },
+                    trace_id=trace_id
+                )
+            
+        except json.JSONDecodeError as e:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to parse OpenAI response: {str(e)}"
+            )
+        except ValidationError as e:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Generated input parameters do not match agent schema: {str(e)}"
+            )
+            
+    except HTTPException:
+        raise
+    except json.JSONDecodeError as e:
+        logger.error(f"Failed to parse OpenAI response: {str(e)}")
+        return InvocationResponse(
+            status="error",
+            error={
+                "code": "OPENAI_RESPONSE_ERROR",
+                "message": "Failed to parse OpenAI response",
+                "details": {
+                    "error_type": "JSONDecodeError",
+                    "error_message": str(e),
+                    "raw_response": response.choices[0].message.content if response and response.choices else None
+                }
+            },
+            trace_id=str(uuid.uuid4())
+        )
+    except Exception as e:
+        logger.error(f"Error in find_and_invoke_agent: {str(e)}")
+        return InvocationResponse(
+            status="error",
+            error={
+                "code": "INTERNAL_ERROR",
+                "message": "An unexpected error occurred while processing your request",
+                "details": {
+                    "error_type": type(e).__name__,
+                    "error_message": str(e),
+                    "query": request.query,
+                    "additional_context": request.additional_context
+                }
+            },
+            trace_id=str(uuid.uuid4())
         )

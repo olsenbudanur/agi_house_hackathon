@@ -66,3 +66,10 @@ class InvocationResponse(BaseModel):
         }
     )
     trace_id: str
+
+class UniversalAgentRequest(BaseModel):
+    """Request model for the find-and-invoke endpoint that uses OpenAI to find and invoke the most suitable agent."""
+    query: str = Field(..., description="The natural language query describing what the user wants to accomplish")
+    max_tokens: Optional[int] = Field(1000, ge=1, le=4096, description="Maximum tokens for OpenAI API response")
+    temperature: Optional[float] = Field(0.7, ge=0.0, le=2.0, description="Temperature for OpenAI API response")
+    additional_context: Optional[str] = Field(None, description="Any additional context that might help in agent selection")
