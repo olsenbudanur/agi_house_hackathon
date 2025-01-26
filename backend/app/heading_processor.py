@@ -34,26 +34,56 @@ def combine_headings(heading: str, subheading: Optional[str] = None) -> str:
         return f"{heading.strip()} ^ {subheading.strip()}"
     return heading.strip()
 
-def detect_heading_pattern(text: str) -> bool:
+def detect_heading_pattern(text: str) -> Tuple[bool, Optional[str]]:
     """
-    Detect if text follows heading pattern rules.
+    Detect if text follows heading pattern rules and identify the category.
     
     Args:
         text: Text to check for heading pattern
         
     Returns:
-        True if text matches heading pattern
+        Tuple of (is_heading, category) where category may be None
     """
-    # Common heading patterns in insurance matrices
-    patterns = [
-        r'^(Primary|Second|Investment)\s+(Residence|Home|Property)',
-        r'^(Purchase|Rate.*Term|Cash.*Out)',
-        r'^(Program|Guidelines?|Requirements?|Restrictions?)',
-        r'^(Credit|Income|Property|Additional)',
-        r'^(LTV|FICO|DTI|Reserves?)',
+    # Section header patterns that indicate requirement categories
+    requirement_categories = {
+        'max_dti_requirements': [
+            r'^Requirements?\s*\^\s*(?:Max(?:imum)?\s*)?DTI(?:\s*Limits?)?',
+            r'^(?:Max(?:imum)?\s*)?DTI\s*Requirements?',
+            r'^DTI\s*Requirements?'
+        ],
+        'credit_requirements': [
+            r'^Requirements?\s*\^\s*Credit',
+            r'^Credit\s*Requirements?'
+        ],
+        'reserve_requirements': [
+            r'^Requirements?\s*\^\s*Reserve',
+            r'^Reserve\s*Requirements?'
+        ],
+        'geographic_restrictions': [
+            r'^Requirements?\s*\^\s*Geographic',
+            r'^Geographic\s*(?:Requirements?|Restrictions?)'
+        ]
+    }
+    
+    # Check for requirement section headers first
+    for category, patterns in requirement_categories.items():
+        if any(re.search(pattern, text, re.IGNORECASE) for pattern in patterns):
+            return True, category
+    
+    # Other heading patterns that aren't requirement sections
+    general_patterns = [
+        r'^(?:Primary|Second|Investment)\s+(?:Residence|Home|Property)',
+        r'^(?:Purchase|Rate.*Term|Cash.*Out)',
+        r'^(?:Program|Guidelines?|Requirements?|Restrictions?)',
+        r'^(?:Credit|Income|Property|Additional)',
+        r'^(?:LTV|FICO|DTI|Reserves?)'
     ]
     
-    return any(re.search(pattern, text, re.IGNORECASE) for pattern in patterns)
+    # Check if it's a general heading
+    if any(re.search(pattern, text, re.IGNORECASE) for pattern in general_patterns):
+        return True, None
+        
+    return False, None
 
 def extract_heading_components(text: str) -> Optional[Tuple[str, Optional[str]]]:
     """
@@ -65,7 +95,8 @@ def extract_heading_components(text: str) -> Optional[Tuple[str, Optional[str]]]
     Returns:
         Tuple of (heading, subheading) if text contains heading pattern, None otherwise
     """
-    if not detect_heading_pattern(text):
+    is_heading, category = detect_heading_pattern(text)
+    if not is_heading:
         return None
         
     return parse_heading(text)

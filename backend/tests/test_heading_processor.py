@@ -28,14 +28,40 @@ def test_combine_headings():
 
 def test_detect_heading_pattern():
     """Test detection of common heading patterns."""
-    assert detect_heading_pattern("Primary Residence")
-    assert detect_heading_pattern("Second Home")
-    assert detect_heading_pattern("Investment Property")
-    assert detect_heading_pattern("Purchase")
-    assert detect_heading_pattern("Rate and Term")
-    assert detect_heading_pattern("Program Requirements")
-    assert not detect_heading_pattern("Random Text")
-    assert not detect_heading_pattern("123456")
+    # Test valid heading patterns
+    is_heading, _ = detect_heading_pattern("Primary Residence")
+    assert is_heading
+    
+    is_heading, _ = detect_heading_pattern("Second Home")
+    assert is_heading
+    
+    is_heading, _ = detect_heading_pattern("Investment Property")
+    assert is_heading
+    
+    is_heading, _ = detect_heading_pattern("Purchase")
+    assert is_heading
+    
+    is_heading, _ = detect_heading_pattern("Rate and Term")
+    assert is_heading
+    
+    is_heading, _ = detect_heading_pattern("Program Requirements")
+    assert is_heading
+    
+    # Test invalid heading patterns
+    is_heading, _ = detect_heading_pattern("Random Text")
+    assert not is_heading
+    
+    is_heading, _ = detect_heading_pattern("123456")
+    assert not is_heading
+    
+    # Test requirement category detection
+    is_heading, category = detect_heading_pattern("Requirements ^ Max DTI")
+    assert is_heading
+    assert category == "max_dti_requirements"
+    
+    is_heading, category = detect_heading_pattern("Credit Requirements")
+    assert is_heading
+    assert category == "credit_requirements"
 
 def test_extract_heading_components():
     """Test extraction of heading components."""
