@@ -19,7 +19,7 @@ class AgentCapabilities(BaseModel):
     capabilities: List[str]
     input_schema: Dict[str, Any]
     output_schema: Dict[str, Any]
-    rate_limits: Dict[str, int]
+    rate_limits: Dict[str, float]  # Changed to float to support decimal values
 
 class InvocationRequest(BaseModel):
     input: Dict[str, Any]

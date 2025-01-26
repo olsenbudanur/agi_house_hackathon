@@ -105,58 +105,65 @@ async def upload_data_dir():
     await upload_embeddings_to_database(embeddings, chunks)
     return {"message": "Upload succeeded"}
 
-@app.post("/query")
-async def query(request: Request):
-    data = await request.json()
-    query_text = data["query"]
-    embedding_response = await embed(query_text)
-    
-    conn = await get_db_connection()
-    cursor = conn.cursor(dictionary=True)
-    
-    query = f"""
-    SELECT text, dot_product(vector, JSON_ARRAY_PACK(%s)) AS score 
-    FROM myvectortable 
-    ORDER BY score DESC 
-    LIMIT 3;
-    """
-    cursor.execute(query, (json.dumps(embedding_response['data'][0]['embedding']),))
-    results = cursor.fetchall()
-    
-    cursor.close()
-    conn.close()
-    return results
+async def query(query_text: str):
+    """Execute a query against the RAG system"""
+    try:
+        embedding_response = await embed(query_text)
+        
+        conn = await get_db_connection()
+        cursor = conn.cursor(dictionary=True)
+        
+        query = f"""
+        SELECT text, dot_product(vector, JSON_ARRAY_PACK(%s)) AS score 
+        FROM myvectortable 
+        ORDER BY score DESC 
+        LIMIT 3;
+        """
+        cursor.execute(query, (json.dumps(embedding_response['data'][0]['embedding']),))
+        results = cursor.fetchall()
+        
+        cursor.close()
+        conn.close()
+        
+        if not results:
+            return [{"text": "No relevant information found", "score": 0}]
+        return results
+    except Exception as e:
+        print(f"Error in query function: {str(e)}")
+        return [{"text": "Error occurred while processing query", "score": 0}]
 
-@app.post("/chat")
-async def chat(request: Request):
-    data = await request.json()
-    messages = data["messages"]
-    
-    if len(messages) > 5:
-        messages = messages[-5:]
-    
-    last_message = messages[-1]["content"]
-    last_message_info = await query(Request({"query": last_message}))
-    messages[-1]["content"] = f"{last_message} - Use this info to answer the question: {last_message_info[0]['text']}"
-    
-    async with aiohttp.ClientSession() as session:
-        headers = {
-            'Content-Type': 'application/json',
-            'Authorization': f'Bearer {OPENAI_API_KEY}'
-        }
-        async with session.post(
-            'https://api.openai.com/v1/chat/completions',
-            headers=headers,
-            json={
-                "model": "gpt-3.5-turbo",
-                "messages": messages,
-                "temperature": 0.7
+async def chat(messages: List[Dict[str, str]]):
+    """Execute a chat interaction with the RAG system"""
+    try:
+        if len(messages) > 5:
+            messages = messages[-5:]
+        
+        last_message = messages[-1]["content"]
+        last_message_info = await query(last_message)
+        context = last_message_info[0]["text"] if last_message_info else ""
+        messages[-1]["content"] = f"{last_message} - Use this info to answer the question: {context}"
+        
+        async with aiohttp.ClientSession() as session:
+            headers = {
+                'Content-Type': 'application/json',
+                'Authorization': f'Bearer {OPENAI_API_KEY}'
             }
-        ) as response:
-            if response.status != 200:
-                raise Exception(f"HTTP error! status: {response.status}")
-            response_data = await response.json()
-            return response_data["choices"][0]["message"]["content"]
+            async with session.post(
+                'https://api.openai.com/v1/chat/completions',
+                headers=headers,
+                json={
+                    "model": "gpt-3.5-turbo",
+                    "messages": messages,
+                    "temperature": 0.7
+                }
+            ) as response:
+                if response.status != 200:
+                    raise Exception(f"HTTP error! status: {response.status}")
+                response_data = await response.json()
+                return response_data["choices"][0]["message"]["content"]
+    except Exception as e:
+        print(f"Error in chat function: {str(e)}")
+        return "I apologize, but I encountered an error while processing your request."
 
 if __name__ == "__main__":
     import uvicorn
