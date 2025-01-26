@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends, Request
+from fastapi import FastAPI, HTTPException, Depends, Request, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
@@ -44,16 +44,18 @@ async def rate_limiter(request: Request):
     if len(rate_limit_storage[client_ip]) >= MAX_REQUESTS_PER_WINDOW:
         response = InvocationResponse(
             status="error",
-            error=ErrorDetails(
-                code="RATE_LIMIT_EXCEEDED",
-                message="Rate limit exceeded. Please try again later.",
-                details={
-                    "error_type": "RateLimitError",
-                    "window_seconds": RATE_LIMIT_WINDOW,
-                    "max_requests": MAX_REQUESTS_PER_WINDOW,
-                    "retry_after": RATE_LIMIT_WINDOW
+            error={
+                "error": {
+                    "code": "RATE_LIMIT_EXCEEDED",
+                    "message": "Rate limit exceeded. Please try again later.",
+                    "details": {
+                        "error_type": "RateLimitError",
+                        "window_seconds": RATE_LIMIT_WINDOW,
+                        "max_requests": MAX_REQUESTS_PER_WINDOW,
+                        "retry_after": RATE_LIMIT_WINDOW
+                    }
                 }
-            ),
+            },
             trace_id=trace_id
         )
         return JSONResponse(
@@ -206,11 +208,35 @@ async def get_capabilities(rate_limit: bool = Depends(rate_limiter), request: Re
 async def invoke_agent(
     request: InvocationRequest,
     rate_limit: bool = Depends(rate_limiter),
-    req: Request = None
+    req: Request = None,
+    marketplace_token: Optional[str] = Header(None, alias="X-Marketplace-Token", description="Optional marketplace token")
 ) -> InvocationResponse:
     """Invoke agent functionality"""
     # Log invocation request
     logger.info(f"Processing invocation request with trace_id: {request.trace_id}")
+    
+    # Log and validate token
+    logger.info(f"Received marketplace token: {marketplace_token}")
+    
+    # In development mode, accept any non-empty token
+    if not marketplace_token or not marketplace_token.strip():
+        logger.error("Missing or empty marketplace token")
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "status": "error",
+                "error": {
+                    "code": "INVALID_TOKEN",
+                    "message": "Missing or invalid marketplace token",
+                    "details": {
+                        "error_type": "AuthenticationError"
+                    }
+                },
+                "trace_id": request.trace_id
+            }
+        )
+    
+    logger.info("Development mode: Token validation passed")
     
     try:
         # Validate input against schema
@@ -219,15 +245,17 @@ async def invoke_agent(
         except jsonschema.exceptions.ValidationError as e:
             return InvocationResponse(
                 status="error",
-                error=ErrorDetails(
-                    code="VALIDATION_ERROR",
-                    message="Input validation failed",
-                    details={
-                        "error_type": "ValidationError",
-                        "validation_error": str(e),
-                        "schema": MOCK_AGENT_CONFIG["input_schema"]
+                error={
+                    "error": {
+                        "code": "VALIDATION_ERROR",
+                        "message": "Input validation failed",
+                        "details": {
+                            "error_type": "ValidationError",
+                            "validation_error": str(e),
+                            "schema": MOCK_AGENT_CONFIG["input_schema"]
+                        }
                     }
-                ),
+                },
                 trace_id=request.trace_id
             )
             
@@ -238,21 +266,23 @@ async def invoke_agent(
         if analysis_type not in ["sentiment", "summary"]:
             return InvocationResponse(
                 status="error",
-                error=ErrorDetails(
-                    code="INVALID_ANALYSIS_TYPE",
-                    message="Invalid analysis type specified",
-                    details={
-                        "error_type": "ValidationError",
-                        "allowed_types": ["sentiment", "summary"],
-                        "received_type": analysis_type
+                error={
+                    "error": {
+                        "code": "INVALID_ANALYSIS_TYPE",
+                        "message": "Invalid analysis type specified",
+                        "details": {
+                            "error_type": "ValidationError",
+                            "allowed_types": ["sentiment", "summary"],
+                            "received_type": analysis_type
+                        }
                     }
-                ),
+                },
                 trace_id=request.trace_id
             )
             
         if analysis_type == "sentiment":
-            result = "positive" if "good" in text.lower() else "negative"
-            confidence = 0.85
+            result = "positive" if any(word in text.lower() for word in ["good", "love", "great", "excellent"]) else "negative"
+            confidence = 0.85 if any(word in text.lower() for word in ["good", "love", "great", "excellent"]) else 0.65
         else:  # summary
             result = f"Summary of: {text[:50]}..."
             confidence = 0.9
@@ -269,28 +299,32 @@ async def invoke_agent(
     except ValueError as e:
         return InvocationResponse(
             status="error",
-            error=ErrorDetails(
-                code="INVALID_INPUT",
-                message=str(e),
-                details={
-                    "error_type": "ValidationError",
-                    "required_fields": ["text", "analysis_type"]
+            error={
+                "error": {
+                    "code": "INVALID_INPUT",
+                    "message": str(e),
+                    "details": {
+                        "error_type": "ValidationError",
+                        "required_fields": ["text", "analysis_type"]
+                    }
                 }
-            ),
+            },
             trace_id=request.trace_id
         )
     except Exception as e:
         logger.error(f"Error processing request: {str(e)}")
         return InvocationResponse(
             status="error",
-            error=ErrorDetails(
-                code="INTERNAL_ERROR",
-                message="An internal error occurred",
-                details={
-                    "error_type": type(e).__name__,
-                    "error_message": str(e)
+            error={
+                "error": {
+                    "code": "INTERNAL_ERROR",
+                    "message": "An internal error occurred",
+                    "details": {
+                        "error_type": type(e).__name__,
+                        "error_message": str(e)
+                    }
                 }
-            ),
+            },
             trace_id=request.trace_id
         )
 
