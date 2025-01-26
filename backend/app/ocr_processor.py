@@ -227,248 +227,136 @@ def detect_spanning_data(lines: List[str], start_idx: int, pattern: str) -> List
     """
     Detect and process multi-row data entries with (1), (2) notation.
     Returns list of tuples: (text, span_index, total_spans)
-    
-    Example patterns from reference:
-    - "Min Loan Amount (1)", "Min Loan Amount (2)"
-    - "Residual Income (1)", "Residual Income (2)"
-    - "No Housing History (1)", "No Housing History (2)"
     """
-    # Initialize result list
-    spanning_data = []
+    logger.debug(f"Starting spanning data detection at line {start_idx}")
+    logger.debug(f"Pattern: {pattern}")
     
-    # Get the initial line
+    # Initialize result list and get current line
     current_line = lines[start_idx].strip()
     if not current_line:
+        logger.debug("Empty current line, returning empty list")
         return []
+
+    # Check if current line matches pattern
+    if not re.search(pattern, current_line):
+        logger.debug(f"Current line '{current_line}' doesn't match pattern")
+        return []
+
+    # Initialize spanning data collection
+    spanning_data = []
+    max_lookahead = 5
+    current_span_index = 0
+    total_spans = 1
+
+    logger.debug(f"Processing current line: {current_line}")
     
-    # Look ahead up to 5 lines to find related entries
-    look_ahead = min(5, len(lines) - start_idx)
-    related_entries = []
-    base_text = None
-    has_indexed_entries = False
-    
-    # First pass: collect all related entries and identify headers/values
-    headers = []
-    values = []
-    
-    for i in range(look_ahead):
-        if start_idx + i >= len(lines):
-            break
-            
-        line = lines[start_idx + i].strip()
-        if not line:
+    # Check current line for span index
+    span_match = re.search(r'\((\d+)\)$', current_line)
+    if span_match:
+        current_span_index = int(span_match.group(1))
+        total_spans = current_span_index
+        logger.debug(f"Found span index {current_span_index} in current line")
+
+    # Add current line to spanning data
+    spanning_data.append((current_line, current_span_index, total_spans))
+
+    # Look ahead for additional spans
+    for i in range(start_idx + 1, min(len(lines), start_idx + max_lookahead)):
+        next_line = lines[i].strip()
+        logger.debug(f"Looking at next line {i}: {next_line}")
+        
+        if not next_line or not re.search(pattern, next_line):
+            logger.debug(f"Line {i} doesn't match pattern or is empty")
             continue
+
+        next_span_match = re.search(r'\((\d+)\)$', next_line)
+        if next_span_match:
+            span_num = int(next_span_match.group(1))
+            logger.debug(f"Found span index {span_num} in line {i}")
             
-        # Extract base text and check for index
-        current_base = re.sub(r'\s*\(\d+\)\s*$', '', line)
-        index_match = re.search(r'\((\d+)\)$', line)
-        current_index = int(index_match.group(1)) if index_match else 0
-        
-        if current_index > 0:
-            has_indexed_entries = True
-        
-        # Only process lines that match our pattern
-        if re.search(pattern, line):
-            # If this is our first pattern match, set it as base text
-            if base_text is None:
-                base_text = current_base
-            
-            # Categorize as header or value
-            if not re.match(r'^\$|\d', current_base):
-                headers.append((current_base, current_index, line))
-            else:
-                values.append((current_base, current_index, line))
+            if span_num > total_spans:
+                total_spans = span_num
+                # Update total_spans for all previous entries
+                spanning_data = [(text, idx, total_spans) for text, idx, _ in spanning_data]
+                logger.debug(f"Updated total spans to {total_spans}")
+                
+            spanning_data.append((next_line, span_num, total_spans))
+
+    # If we have no spanning indicators, return single entry
+    if len(spanning_data) == 1 and spanning_data[0][1] == 0:
+        logger.debug("Single non-spanning entry found")
+        return [(spanning_data[0][0], 0, 1)]
+
+    # Sort by span index (non-zero indices first, then zero indices)
+    spanning_data.sort(key=lambda x: float('inf') if x[1] == 0 else x[1])
+    logger.debug(f"Final spanning data: {spanning_data}")
     
-    # If no entries found, return empty list
-    if not headers and not values:
-        return []
-        
-    # If only one entry total and no indices, return as single entry
-    if len(headers) + len(values) == 1 and not has_indexed_entries:
-        return [(headers[0][2] if headers else values[0][2], 0, 1)]
-    
-    # Get all non-zero indices and find the maximum
-    all_indices = [idx for _, idx, _ in headers + values if idx > 0]
-    max_index = max(all_indices) if all_indices else len(headers + values)
-    
-    # Process entries
-    processed_entries = []
-    seen_indices = set()
-    
-    # First, get the base header text if available
-    header_base = headers[0][0] if headers else None
-    
-    # Special case: If we have a header without index and a value with index 1,
-    # use the header text for index 1 instead of the value
-    if header_base and any(idx == 0 for _, idx, _ in headers) and any(idx == 1 for _, idx, _ in values):
-        processed_entries.append((f"{header_base} (1)", 1, max_index))
-        seen_indices.add(1)
-        
-        # Add remaining indexed entries
-        for entries in [headers, values]:
-            for base, idx, line in entries:
-                if idx > 1 and idx not in seen_indices:
-                    if entries == headers:
-                        processed_entries.append((f"{base} ({idx})", idx, max_index))
-                    else:
-                        processed_entries.append((line, idx, max_index))
-                    seen_indices.add(idx)
-    else:
-        # Handle entries with explicit indices first
-        for entries in [headers, values]:
-            for base, idx, line in entries:
-                if idx > 0 and idx not in seen_indices:
-                    if entries == headers:
-                        processed_entries.append((f"{base} ({idx})", idx, max_index))
-                    else:
-                        processed_entries.append((line, idx, max_index))
-                    seen_indices.add(idx)
-        
-        # Then handle implicit indices
-        if has_indexed_entries and 1 not in seen_indices:
-            # If we have a header without index, use it for index 1
-            if header_base and any(idx == 0 for _, idx, _ in headers):
-                processed_entries.append((f"{header_base} (1)", 1, max_index))
-                seen_indices.add(1)
-            # Otherwise use the first value without index
-            elif values and any(idx == 0 for _, idx, _ in values):
-                for base, idx, line in values:
-                    if idx == 0:
-                        processed_entries.append((line, 1, max_index))
-                        seen_indices.add(1)
-                        break
-        elif not has_indexed_entries:
-            # No indexed entries - use header if available, otherwise first value
-            if headers:
-                return [(headers[0][2], 0, 1)]
-            else:
-                return [(values[0][2], 0, 1)]
-    
-    # Sort by index and return
-    processed_entries.sort(key=lambda x: x[1])
-    return processed_entries
+    return spanning_data
+
+from .heading_processor import extract_heading_components, combine_headings, detect_heading_pattern
+from .matrix_types import HeadingData
 
 def parse_ltv_section(text: str) -> Dict:
-    """Parse LTV requirements from text with enhanced pattern matching and multi-row data support."""
-    # Initialize with default structure using SpanningData format for loan amounts
-    ltv_data = {
-        "primary_residence": {
-            "purchase": {"max_ltv": "85%", "min_fico": 740, "max_loan": {"value": "$1,000,000", "span_index": None, "span_total": None}},
-            "rate_and_term": {"max_ltv": "85%", "min_fico": 740, "max_loan": {"value": "$1,000,000", "span_index": None, "span_total": None}},
-            "cash_out": {"max_ltv": "75%", "min_fico": 740, "max_loan": {"value": "$1,000,000", "span_index": None, "span_total": None}}
-        },
-        "second_home": {
-            "purchase": {"max_ltv": "75%", "min_fico": 740, "max_loan": {"value": "$1,000,000", "span_index": None, "span_total": None}},
-            "rate_and_term": {"max_ltv": "75%", "min_fico": 740, "max_loan": {"value": "$1,000,000", "span_index": None, "span_total": None}},
-            "cash_out": {"max_ltv": "70%", "min_fico": 740, "max_loan": {"value": "$1,000,000", "span_index": None, "span_total": None}}
-        },
-        "investment": {
-            "purchase": {"max_ltv": "75%", "min_fico": 740, "max_loan": {"value": "$1,000,000", "span_index": None, "span_total": None}},
-            "rate_and_term": {"max_ltv": "75%", "min_fico": 740, "max_loan": {"value": "$1,000,000", "span_index": None, "span_total": None}},
-            "cash_out": {"max_ltv": "70%", "min_fico": 740, "max_loan": {"value": "$1,000,000", "span_index": None, "span_total": None}}
-        }
-    }
+    """Parse LTV requirements from text with enhanced pattern matching, multi-row data support,
+    and hierarchical heading structure."""
+    # Initialize with flexible structure for heading-based organization
+    ltv_data = {}
     
     # Enhanced pattern matching for matrix cells
     ltv_pattern = r"(\d{2,3})%"  # Match percentages
     fico_pattern = r"\b(7[234]0)\b"  # Match FICO scores (720, 730, 740)
-    loan_amount_pattern = r"\$?\s*(\d{1,3}(?:,\d{3})*)"  # Match loan amounts without decimals
+    loan_pattern = r"(?:[\$]?\s*(?:\d{1,3}(?:,\d{3})*(?:\.\d+)?)|(?:[\$]?\s*\d+(?:\.\d+)?\s*MM?))"
     
     # Split text into lines and process
     lines = [line.strip() for line in text.split('\n') if line.strip()]
-    
-    # Find the matrix header row
-    header_row = None
-    for i, line in enumerate(lines):
-        if "FICO" in line and ("Purch" in line or "R/T" in line):
-            header_row = i
-            break
-    
-    if header_row is None:
-        logger.warning("Could not find header row in matrix")
-        return ltv_data
-    
-    # Initialize tracking variables with None to detect missing values
-    current_loan_amount = None
-    current_fico = None
-    current_property_type = "primary_residence"
-    
-    # Initialize matrix structure tracking
-    matrix_data = {
-        'headers': [],
-        'rows': []
-    }
-    
-    # Enhanced header detection with multiple patterns
-    header_patterns = [
-        (r'FICO.*(?:Purch|R/T|Cash).*', 'standard'),
-        (r'(?:Primary|Second|Investment).*LTV.*', 'section'),
-        (r'Loan\s+Amount.*', 'amount')
-    ]
-    
-    # Find all potential header rows
-    header_candidates = []
-    for i in range(header_row, min(header_row + 10, len(lines))):
-        line = lines[i].strip()
-        for pattern, htype in header_patterns:
-            if re.search(pattern, line, re.IGNORECASE):
-                # Clean and normalize header text
-                cleaned_line = re.sub(r'\s+', ' ', line).strip()
-                header_candidates.append((i, cleaned_line, htype))
-                logger.debug(f"Found potential {htype} header at line {i}: {cleaned_line}")
-    
-    # Process headers to extract column structure
-    main_header_row = None
-    for i, line, htype in header_candidates:
-        if htype == 'standard':
-            # Split header into columns, handling common variations
-            headers = []
-            parts = re.split(r'\s{2,}|\t|\|', line)
-            for part in parts:
-                part = part.strip()
-                if part:
-                    if "FICO" in part:
-                        headers.append("FICO")
-                    elif "Purch" in part and "R/T" in part:
-                        headers.extend(["Purchase", "Rate/Term"])
-                    elif "Cash" in part:
-                        headers.append("Cash Out")
-                    else:
-                        headers.append(part)
-            
-            matrix_data['headers'] = headers
-            main_header_row = i
-            logger.debug(f"Processed main header row: {headers}")
-            break
-    
-    if not main_header_row:
-        logger.warning("Could not find main header row")
-        return ltv_data
-    
-    # Process matrix rows with enhanced structure detection
     current_section = None
-    for i in range(main_header_row + 1, len(lines)):
-        line = lines[i].strip()
+    current_loan_amount = None
+    
+    # Process each line
+    for i, line in enumerate(lines):
+        # Skip empty lines
         if not line or line.isspace():
             continue
             
         # Log each line for debugging
         logger.debug(f"Processing line {i}: {line}")
             
-        # Detect section changes
-        if "Primary" in line:
-            current_property_type = "primary_residence"
-            continue
-        elif "Second Home" in line:
-            current_property_type = "second_home"
-            continue
-        elif "Investment" in line:
-            current_property_type = "investment"
+        # Check for heading patterns and create hierarchical structure
+        heading_components = extract_heading_components(line)
+        if heading_components:
+            heading, subheading = heading_components
+            if subheading:
+                # We have both heading and subheading
+                section_key = combine_headings(heading, subheading)
+                if section_key not in ltv_data:
+                    ltv_data[section_key] = {
+                        "max_ltv": None,
+                        "min_fico": None,
+                        "max_loan": None,
+                        "heading": HeadingData(heading=heading, subheading=subheading)
+                    }
+                current_section = section_key
+            else:
+                # Just a heading
+                if heading not in ltv_data:
+                    ltv_data[heading] = {
+                        "max_ltv": None,
+                        "min_fico": None,
+                        "max_loan": None,
+                        "heading": HeadingData(heading=heading)
+                    }
+                current_section = heading
+            logger.debug(f"Detected heading structure: {current_section}")
             continue
             
         # Enhanced loan amount detection with spanning data support
-        loan_amount_match = None
-        if "$" in line or any(x in line.upper() for x in ["MM", "MILLION", "000"]):
+        if ("$" in line or any(x in line.upper() for x in ["MM", "MILLION", "000"])) and \
+           current_section:
+            
+            # Initialize max_loan if not present
+            if "max_loan" not in ltv_data[current_section]:
+                ltv_data[current_section]["max_loan"] = None
+                
             # Check for spanning loan amount data
             spanning_amounts = detect_spanning_data(
                 lines, i,
@@ -476,125 +364,113 @@ def parse_ltv_section(text: str) -> Dict:
             )
             
             if spanning_amounts:
-                # Convert the detected amounts to numeric values
-                for amount_str, span_idx, total_spans in spanning_amounts:
-                    # Define comprehensive amount patterns
-                    amount_patterns = [
-                # Standard notation
-                (r'[\$]?\s*(?:1|one)[,.]?000[,.]?000', 1000000),
-                (r'[\$]?\s*(?:1|one)[,.]?5(?:00[,.]?000)?', 1500000),
-                (r'[\$]?\s*(?:2|two)[,.]?000[,.]?000', 2000000),
-                (r'[\$]?\s*(?:2|two)[,.]?5(?:00[,.]?000)?', 2500000),
-                # MM notation
-                (r'[\$]?\s*1\s*MM', 1000000),
-                (r'[\$]?\s*1\.5\s*MM', 1500000),
-                (r'[\$]?\s*2\s*MM', 2000000),
-                (r'[\$]?\s*2\.5\s*MM', 2500000),
-                # Range notation
-                (r'[\$]?\s*1[,.]000[,.]001\s*-\s*[\$]?\s*1[,.]500[,.]000', 1500000),
-                (r'[\$]?\s*1[,.]500[,.]001\s*-\s*[\$]?\s*2[,.]000[,.]000', 2000000),
-                (r'[\$]?\s*2[,.]000[,.]001\s*-\s*[\$]?\s*2[,.]500[,.]000', 2500000),
-            ]
-            
-            for pattern, amount in amount_patterns:
-                if re.search(pattern, line, re.IGNORECASE):
-                    if span_idx > 0:
-                        current_loan_amount = {
-                            "value": f"${amount:,}",
-                            "span_index": span_idx,
-                            "span_total": total_spans
-                        }
-                        logger.debug(f"Found spanning loan amount: {current_loan_amount}")
-                    else:
-                        current_loan_amount = {
-                            "value": f"${amount:,}",
-                            "span_index": None,
-                            "span_total": None
-                        }
-                        logger.debug(f"Found single loan amount: {current_loan_amount}")
-                    break
+                logger.debug(f"Processing spanning amounts for section {current_section}: {spanning_amounts}")
+                
+                # Sort spanning amounts by index, treating 0 as infinity to put it last
+                sorted_amounts = sorted(spanning_amounts, key=lambda x: float('inf') if x[1] == 0 else x[1])
+                logger.debug(f"Sorted amounts: {sorted_amounts}")
+                
+                # Only process if we haven't already set a valid loan amount
+                if ltv_data[current_section]["max_loan"] is None:
+                    # Get the first amount (should be index 1 if we have spanning data)
+                    if sorted_amounts:
+                        first_amount = sorted_amounts[0]
+                        logger.debug(f"Selected first amount: {first_amount}")
+                        
+                        # Extract the dollar amount using regex
+                        amount_match = re.search(r'\$[\d,]+(?:\.\d+)?', first_amount[0])
+                        if amount_match:
+                            amount_value = amount_match.group(0)
+                            logger.debug(f"Extracted amount value: {amount_value}")
+                            
+                            current_loan_amount = {
+                                "value": amount_value,
+                                "span_index": first_amount[1] if first_amount[1] > 0 else None,
+                                "span_total": first_amount[2] if first_amount[2] > 1 else None,
+                                "heading": ltv_data[current_section]["heading"]
+                            }
+                            logger.debug(f"Created loan amount object: {current_loan_amount}")
+                            
+                            ltv_data[current_section]["max_loan"] = current_loan_amount
+                            logger.debug(f"Updated section {current_section} with loan amount: {current_loan_amount}")
+                else:
+                    logger.debug(f"Skipping loan amount processing for {current_section} - already set to {ltv_data[current_section]['max_loan']}")
+                
+                # Skip the next few lines that are part of this spanning data
+                skip_lines = len(sorted_amounts) - 1
+                logger.debug(f"Skipping next {skip_lines} lines")
+                i += skip_lines
+                continue
                     
         # Look for FICO and LTV combinations
         fico_matches = re.findall(r'\b(7[234]0)\b', line)
         ltv_matches = re.findall(r'(\d{2,3})%', line)
         
-        # Check for property type changes
-        if "Second Home" in line:
-            current_property_type = "second_home"
-            logger.debug(f"Switched to property type: {current_property_type}")
-            continue
-        elif "Investment" in line:
-            current_property_type = "investment"
-            logger.debug(f"Switched to property type: {current_property_type}")
-            continue
-        
-        # Look for FICO and LTV combinations with enhanced context
-        fico_matches = re.findall(fico_pattern, line)
-        if fico_matches:
-            current_fico = int(fico_matches[0])
-            logger.debug(f"Found FICO score: {current_fico}")
-            
-            # Look for LTV values on the same line
-            ltv_matches = re.findall(ltv_pattern, line)
-            if ltv_matches:
-                logger.debug(f"Found LTV values: {ltv_matches}")
-                
-                # Process row data if we have both FICO and LTV values
-                if fico_matches and ltv_matches:
-                    current_fico = int(fico_matches[0])
-                    logger.debug(f"Processing row with FICO {current_fico} and LTVs {ltv_matches}")
-                    
-                    # Map LTVs to transaction types based on header positions
-                    if matrix_data['headers']:
-                        for idx, ltv in enumerate(ltv_matches):
-                            if idx < len(matrix_data['headers']):
-                                header = matrix_data['headers'][idx + 1]  # +1 to skip FICO column
-                                
-                                # Determine transaction type from header
-                                if "Purch" in header:
-                                    ltv_data[current_property_type]["purchase"] = {
-                                        "max_ltv": ltv + "%",
-                                        "min_fico": current_fico,
-                                        "max_loan": current_loan_amount
-                                    }
-                                    # Assume R/T same as purchase unless specified
-                                    if "R/T" in header:
-                                        ltv_data[current_property_type]["rate_and_term"] = {
-                                            "max_ltv": ltv + "%",
-                                            "min_fico": current_fico,
-                                            "max_loan": current_loan_amount
-                                        }
-                                elif "Cash" in header:
-                                    ltv_data[current_property_type]["cash_out"] = {
-                                        "max_ltv": ltv + "%",
-                                        "min_fico": current_fico,
-                                        "max_loan": current_loan_amount
-                                    }
-                    else:
-                        # Fallback if headers not found - use position-based logic
-                        if len(ltv_matches) >= 1:
-                            ltv_data[current_property_type]["purchase"] = {
-                                "max_ltv": ltv_matches[0] + "%",
-                                "min_fico": current_fico,
-                                "max_loan": current_loan_amount
-                            }
-                            ltv_data[current_property_type]["rate_and_term"] = {
-                                "max_ltv": ltv_matches[0] + "%",
-                                "min_fico": current_fico,
-                                "max_loan": current_loan_amount
-                            }
-                        if len(ltv_matches) > 1:
-                            ltv_data[current_property_type]["cash_out"] = {
-                                "max_ltv": ltv_matches[-1] + "%",
-                                "min_fico": current_fico,
-                                "max_loan": current_loan_amount
-                            }
-                    ltv_data[current_property_type]["cash_out"] = {
-                        "max_ltv": ltv_matches[1] + "%",
-                        "min_fico": current_fico,
-                        "max_loan": current_loan_amount
+        # Check for heading patterns and create hierarchical structure
+        heading_components = extract_heading_components(line)
+        if heading_components:
+            heading, subheading = heading_components
+            if subheading:
+                # We have both heading and subheading
+                section_key = combine_headings(heading, subheading)
+                if section_key not in ltv_data:
+                    ltv_data[section_key] = {
+                        "max_ltv": None,
+                        "min_fico": None,
+                        "max_loan": None,
+                        "heading": HeadingData(heading=heading, subheading=subheading)
                     }
-    
+                current_section = section_key
+            else:
+                # Just a heading
+                if heading not in ltv_data:
+                    ltv_data[heading] = {
+                        "max_ltv": None,
+                        "min_fico": None,
+                        "max_loan": None,
+                        "heading": HeadingData(heading=heading)
+                    }
+                current_section = heading
+            logger.debug(f"Detected heading structure: {current_section}")
+            continue
+            
+        # Process loan amounts with spanning data support
+        if "$" in line or any(x in line.upper() for x in ["MM", "MILLION"]):
+            spanning_amounts = detect_spanning_data(lines, i, loan_pattern)
+            if spanning_amounts and current_section:
+                # Sort by span index to ensure we get the first amount in sequence
+                spanning_amounts.sort(key=lambda x: x[1] if x[1] > 0 else float('inf'))
+                amount_data = spanning_amounts[0]  # Get first amount entry
+                
+                # Extract just the dollar amount using regex
+                amount_match = re.search(r'\$[\d,]+(?:\.\d+)?', amount_data[0])
+                if amount_match:
+                    amount_value = amount_match.group(0)
+                    current_loan_amount = {
+                        "value": amount_value,
+                        "span_index": amount_data[1] if amount_data[1] > 0 else None,
+                        "span_total": amount_data[2] if amount_data[2] > 1 else None,
+                        "heading": ltv_data[current_section]["heading"]
+                    }
+                    ltv_data[current_section]["max_loan"] = current_loan_amount
+                    logger.debug(f"Processed loan amount for {current_section}: {current_loan_amount}")
+        
+        # Look for FICO and LTV combinations with enhanced context and heading support
+        if current_section:
+            fico_matches = re.findall(fico_pattern, line)
+            ltv_matches = re.findall(ltv_pattern, line)
+            
+            if fico_matches:
+                current_fico = int(fico_matches[0])
+                ltv_data[current_section]["min_fico"] = current_fico
+                logger.debug(f"Found FICO score: {current_fico} for section: {current_section}")
+                
+            if ltv_matches:
+                ltv_value = f"{ltv_matches[0]}%"
+                ltv_data[current_section]["max_ltv"] = ltv_value
+                logger.debug(f"Found LTV value: {ltv_value} for section: {current_section}")
+                                
+    # Return the processed data
     return ltv_data
 
 async def process_matrix_with_ocr(contents: bytes, content_type: str) -> Tuple[Dict, List[str], List[str]]:

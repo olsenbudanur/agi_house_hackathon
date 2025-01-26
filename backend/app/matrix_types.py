@@ -1,16 +1,28 @@
 from typing import Dict, List, Optional, Union, Any
 from pydantic import BaseModel, Field
 
+class HeadingData(BaseModel):
+    """Model for hierarchical heading data using 'heading ^ subheading' notation."""
+    heading: str
+    subheading: Optional[str] = None
+    
+    def __str__(self) -> str:
+        if self.subheading:
+            return f"{self.heading} ^ {self.subheading}"
+        return self.heading
+
 class SpanningData(BaseModel):
     """Model for data that can span multiple rows with (1), (2), etc. notation."""
     value: str
     span_index: Optional[int] = None
     span_total: Optional[int] = None
+    heading: Optional[HeadingData] = None  # Associated heading data if any
 
 class LoanRequirements(BaseModel):
     max_ltv: str = Field(description="Maximum Loan-to-Value ratio as percentage")
     min_fico: int = Field(description="Minimum FICO score required")
     max_loan: SpanningData = Field(description="Maximum loan amount with potential row spanning")
+    heading: Optional[HeadingData] = Field(None, description="Hierarchical heading data")
 
 class PropertyTypeRequirements(BaseModel):
     purchase: LoanRequirements
