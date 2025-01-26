@@ -35,14 +35,29 @@ class LTVRequirements(BaseModel):
     investment: PropertyTypeRequirements
 
 class CreditEvents(BaseModel):
-    bankruptcy: str
-    foreclosure: str
-    short_sale: str
+    """Model for credit event requirements."""
+    bankruptcy: Optional[str] = None
+    foreclosure: Optional[str] = None
+    short_sale: Optional[str] = None
 
 class CreditRequirements(BaseModel):
-    minimum_fico: int
-    maximum_dti: float
-    credit_events: CreditEvents
+    """Model for credit-related requirements."""
+    minimum_fico: Optional[int] = None
+    maximum_dti: Optional[float] = None
+    credit_events: Dict[str, Optional[str]] = Field(default_factory=dict)
+
+class ReserveRequirements(BaseModel):
+    """Model for reserve requirements."""
+    months_pitia: Optional[int] = None
+    description: Optional[str] = None
+    conditions: List[str] = Field(default_factory=list)
+
+class RequirementsData(BaseModel):
+    """Model for all requirements sections."""
+    max_dti: Optional[float] = None
+    credit_requirements: CreditRequirements = Field(default_factory=CreditRequirements)
+    reserve_requirements: Optional[str] = None
+    geographic_restrictions: List[str] = Field(default_factory=list)
 
 class SelfEmployed(BaseModel):
     requirements: list[str]
@@ -64,12 +79,13 @@ class AdditionalRequirements(BaseModel):
     mortgage_insurance: str
 
 class MatrixData(BaseModel):
+    """Model for complete matrix data."""
     program_name: str
     effective_date: str
     processing_methods: List[str]
     confidence_scores: Dict[str, str]
     ltv_requirements: LTVRequirements
-    credit_requirements: CreditRequirements
+    requirements: RequirementsData = Field(default_factory=RequirementsData)
     property_requirements: PropertyRequirements
     processing_metadata: Dict[str, Union[str, int, float, bool]]
     gpt4_structured_analysis: Optional[Dict[str, Any]] = None
