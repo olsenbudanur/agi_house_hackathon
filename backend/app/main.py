@@ -238,21 +238,9 @@ async def process_matrix(file: UploadFile = File(...)):
         # Convert content type to lowercase for consistent comparison
         content_type = file.content_type.lower()
         
-        # Strict file type validation for images only
-        allowed_types = {'image/png', 'image/jpeg', 'image/jpg', 'image/webp'}
+        # Allow both images and PDFs
+        allowed_types = {'image/png', 'image/jpeg', 'image/jpg', 'image/webp', 'application/pdf'}
         
-        # Check if it's a PDF and return appropriate error
-        if content_type == 'application/pdf':
-            return JSONResponse(
-                status_code=400,
-                content=ErrorResponse(
-                    error="PDF Not Supported",
-                    details={
-                        "message": "PDF files are not currently supported. Please convert to image format.",
-                        "suggestion": "Convert your PDF to PNG or JPEG and try again."
-                    }
-                ).dict()
-            )
         if file.content_type not in allowed_types:
             logger.error(f"Rejected file type: {file.content_type}")
             return JSONResponse(
@@ -283,8 +271,22 @@ async def process_matrix(file: UploadFile = File(...)):
             )
 
         try:
+            # Handle PDF conversion if necessary
+            if content_type == 'application/pdf':
+                logger.info("Converting PDF to image")
+                import pdf2image
+                images = pdf2image.convert_from_bytes(contents)
+                # For MVP, just process the first page
+                img = images[0]
+                # Convert PIL Image to bytes
+                img_byte_arr = BytesIO()
+                img.save(img_byte_arr, format='PNG')
+                contents = img_byte_arr.getvalue()
+                content_type = 'image/png'
+                logger.info("Successfully converted PDF to PNG image")
+            
             # Process the matrix using OCR and GPT-4 Vision
-            matrix_data, validation_errors, validation_warnings = await process_matrix_with_ocr(contents, file.content_type)
+            matrix_data, validation_errors, validation_warnings = await process_matrix_with_ocr(contents, content_type)
             
             # Format the response
             response_data = {
