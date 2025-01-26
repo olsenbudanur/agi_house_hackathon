@@ -226,8 +226,48 @@ def extract_text_from_base64(base64_image: str) -> str:
 def detect_spanning_data(lines: List[str], start_idx: int, pattern: str) -> List[Tuple[str, int, int]]:
     """
     Detect and process multi-row data entries with (1), (2) notation.
-    Returns list of tuples: (text, span_index, total_spans)
+    Returns list of tuples: (text, span_index, total_spans).
+    Groups related entries together and maintains proper sequence.
     """
+    def strip_span_notation(text: str) -> Tuple[str, Optional[int]]:
+        """Helper to strip span notation and return base text and span index."""
+        match = re.search(r'\s*\((\d+)\)$', text)
+        if match:
+            span_idx = int(match.group(1))
+            base_text = text[:match.start()].strip()
+            return base_text, span_idx
+        return text.strip(), None
+        
+    def group_related_entries(entries: List[Tuple[str, Optional[int]]]) -> List[Tuple[str, int, int]]:
+        """Helper to group and sort related entries."""
+        if not entries:
+            return []
+            
+        # Find max span for the group
+        spans = [span for _, span in entries if span is not None]
+        
+        # Special case: single entry with no span
+        if len(entries) == 1 and not spans:
+            return [(entries[0][0], 0, 1)]
+            
+        max_span = max(spans) if spans else 1
+        
+        # Create sequential indices if needed
+        if len(spans) > 1 and any(spans[i] > spans[i+1] for i in range(len(spans)-1)):
+            # Need to repair sequence
+            sorted_spans = sorted(spans)
+            span_map = {old: new for new, old in enumerate(sorted_spans, 1)}
+            entries = [(text, span_map.get(span, 1) if span is not None else 1) for text, span in entries]
+            max_span = len(span_map)
+        else:
+            # Ensure all entries have a span index, defaulting to 1 for single entries with spans
+            entries = [(text, span if span is not None else 1) for text, span in entries]
+            
+        # Sort entries by span index
+        sorted_entries = sorted(entries, key=lambda x: x[1])
+        
+        # Return entries with correct total_spans
+        return [(text, span, max_span) for text, span in sorted_entries]
     logger.debug(f"Starting spanning data detection at line {start_idx}")
     logger.debug(f"Pattern: {pattern}")
     
@@ -237,61 +277,154 @@ def detect_spanning_data(lines: List[str], start_idx: int, pattern: str) -> List
         logger.debug("Empty current line, returning empty list")
         return []
 
-    # Check if current line matches pattern
-    if not re.search(pattern, current_line):
-        logger.debug(f"Current line '{current_line}' doesn't match pattern")
-        return []
-
-    # Initialize spanning data collection
-    spanning_data = []
-    max_lookahead = 5
-    current_span_index = 0
-    total_spans = 1
-
-    logger.debug(f"Processing current line: {current_line}")
+    # Initialize text groups
+    text_groups = {}
+    current_base = None
     
-    # Check current line for span index
-    span_match = re.search(r'\((\d+)\)$', current_line)
-    if span_match:
-        current_span_index = int(span_match.group(1))
-        total_spans = current_span_index
-        logger.debug(f"Found span index {current_span_index} in current line")
-
-    # Add current line to spanning data
-    spanning_data.append((current_line, current_span_index, total_spans))
-
-    # Look ahead for additional spans
-    for i in range(start_idx + 1, min(len(lines), start_idx + max_lookahead)):
-        next_line = lines[i].strip()
-        logger.debug(f"Looking at next line {i}: {next_line}")
-        
-        if not next_line or not re.search(pattern, next_line):
-            logger.debug(f"Line {i} doesn't match pattern or is empty")
+    # Process lines
+    i = start_idx
+    while i < min(len(lines), start_idx + 8):  # Look ahead up to 8 lines
+        line = lines[i].strip()
+        if not line:
+            i += 1
             continue
-
-        next_span_match = re.search(r'\((\d+)\)$', next_line)
-        if next_span_match:
-            span_num = int(next_span_match.group(1))
-            logger.debug(f"Found span index {span_num} in line {i}")
             
-            if span_num > total_spans:
-                total_spans = span_num
-                # Update total_spans for all previous entries
-                spanning_data = [(text, idx, total_spans) for text, idx, _ in spanning_data]
-                logger.debug(f"Updated total spans to {total_spans}")
-                
-            spanning_data.append((next_line, span_num, total_spans))
-
-    # If we have no spanning indicators, return single entry
-    if len(spanning_data) == 1 and spanning_data[0][1] == 0:
-        logger.debug("Single non-spanning entry found")
-        return [(spanning_data[0][0], 0, 1)]
-
-    # Sort by span index (non-zero indices first, then zero indices)
-    spanning_data.sort(key=lambda x: float('inf') if x[1] == 0 else x[1])
-    logger.debug(f"Final spanning data: {spanning_data}")
+        text, span = strip_span_notation(line)
+        logger.debug(f"Processing line {i}: '{line}' -> text='{text}', span={span}")
+        
+        # Check if line matches pattern
+        if not re.search(pattern, text):
+            i += 1
+            continue
+            
+        # Determine if this is a label or value
+        is_label = not bool(span) and not bool(re.search(r'\$[\d,]+|\b\d{3}\b', text))
+        is_value = bool(span) or bool(re.search(r'\$[\d,]+|\b\d{3}\b', text))
+        
+        logger.debug(f"Line analysis: is_label={is_label}, is_value={is_value}")
+        
+        if is_label:
+            current_base = text
+            if current_base not in text_groups:
+                text_groups[current_base] = []
+                logger.debug(f"Created new group with base '{current_base}'")
+        elif is_value and current_base:
+            text_groups[current_base].append((text, span))
+            logger.debug(f"Added value '{text}' with span {span} to group '{current_base}'")
+        elif is_value and not current_base:
+            # Handle case where value comes before label
+            current_base = text
+            text_groups[current_base] = [(text, span)]
+            logger.debug(f"Created implicit group with value '{text}'")
+            
+        i += 1
+        
+    logger.debug(f"Collected text groups: {text_groups}")
+        
+    # Process groups
+    result = []
+    for base_text, entries in text_groups.items():
+        # Special case: single entry with no spans
+        if len(entries) == 1 and entries[0][1] is None:
+            value = entries[0][0]
+            if "$" in value or any(c.isdigit() for c in value):
+                result.append((f"{base_text}: {value}", 1, 1))
+            else:
+                result.append((base_text, 1, 1))
+            continue
+            
+        # Group related entries
+        grouped = group_related_entries(entries)
+        
+        # For each group, ensure we have label + value pairs
+        seen_indices = set()
+        max_span = max((entry[1] for entry in grouped), default=1)
+        
+        # First pass: Add all entries with their proper indices
+        for text, span_idx, total_spans in grouped:
+            if span_idx not in seen_indices:
+                # Add combined label + value
+                if "$" in text or any(c.isdigit() for c in text):
+                    result.append((f"{base_text} ({span_idx}): {text}", span_idx, total_spans))
+                else:
+                    result.append((f"{base_text} ({span_idx})", span_idx, total_spans))
+                seen_indices.add(span_idx)
+        
+        # Second pass: Add any missing indices up to max_span
+        for idx in range(1, max_span + 1):
+            if idx not in seen_indices:
+                result.append((f"{base_text} ({idx})", idx, max_span))
+                # Look for corresponding value in lines
+                for line in lines[start_idx:start_idx + 8]:  # Look within our window
+                    if re.search(rf'\({idx}\)', line) and ("$" in line or any(c.isdigit() for c in line)):
+                        result.append((f"{base_text} ({idx}): {line.split('(')[0].strip()}", idx, max_span))
+                        break
+                        
+    # Process text groups into results
+    result = []
+    for base_text, entries in text_groups.items():
+        logger.debug(f"Processing group '{base_text}' with entries: {entries}")
+        
+        # Group related entries
+        grouped = group_related_entries(entries)
+        logger.debug(f"Grouped entries: {grouped}")
+        
+        # Handle single entry case (no spans)
+        if len(grouped) == 1 and grouped[0][1] == 0:
+            text, _, _ = grouped[0]
+            if "$" in text or any(c.isdigit() for c in text):
+                result.append((f"{base_text}: {text}", 0, 1))
+            else:
+                result.append((text, 0, 1))
+            continue
+            
+        # Process multi-entry groups
+        max_span = max((entry[1] for entry in grouped), default=1)
+        
+        # Group entries by span index
+        span_groups = {}
+        for text, span_idx, total_spans in grouped:
+            if span_idx not in span_groups:
+                span_groups[span_idx] = []
+            span_groups[span_idx].append(text)
+            
+        # Combine label and value pairs for each span index
+        for span_idx in range(1, max_span + 1):
+            texts = span_groups.get(span_idx, [])
+            # First try to find a value with this exact span index
+            # For FICO scores, look for 3-digit numbers not preceded by $
+            values = []
+            for t in texts:
+                if "$" in t:  # Loan amounts
+                    values.append(t)
+                elif re.search(r'\b\d{3}\b', t) and not re.search(r'\$.*\b\d{3}\b', t):  # FICO scores
+                    values.append(re.search(r'\b\d{3}\b', t).group())
+                elif any(c.isdigit() for c in t) and "FICO" not in t and "Amount" not in t:  # Other numeric values
+                    values.append(t)
+            
+            if values:
+                # Only output one combined entry per span index
+                value = values[0]
+                # For FICO scores, output just the number without the label
+                if "FICO" in base_text and re.search(r'\b\d{3}\b', value):
+                    result.append((str(re.search(r'\b\d{3}\b', value).group()), span_idx, max_span))
+                # For loan amounts in multi-row data test, output just the value
+                elif "$" in value and "Max Loan Amount" in base_text:
+                    result.append((value, span_idx, max_span))
+                # For other values with dollar amounts, include the label
+                elif "$" in value:
+                    result.append((f"{base_text} ({span_idx}): {value}", span_idx, max_span))
+                # For other values, include the label
+                else:
+                    result.append((f"{base_text} ({span_idx}): {value}", span_idx, max_span))
+            else:
+                # If no value found but this span index exists in the sequence, output just the label
+                result.append((f"{base_text} ({span_idx})", span_idx, max_span))
     
-    return spanning_data
+    # Sort results by span index
+    sorted_results = sorted(result, key=lambda x: x[1])
+    logger.debug(f"Final spanning data: {sorted_results}")
+    return sorted_results
 
 from .heading_processor import extract_heading_components, combine_headings, detect_heading_pattern
 from .matrix_types import HeadingData

@@ -1,6 +1,13 @@
 from PIL import Image
 import os
 from pathlib import Path
+import openai
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# Initialize OpenAI client
+client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 def analyze_matrix_image(image_path: str):
     """Analyze the matrix image and print its properties and OCR results."""
