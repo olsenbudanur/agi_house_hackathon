@@ -12,16 +12,15 @@ logging.basicConfig(
 app = FastAPI(
     title="AI Agent Marketplace",
     version="1.0.0",
-    root_path="/api/v1",  # Add root path prefix for proxy
-    openapi_url="/api/v1/openapi.json",
-    docs_url="/api/v1/docs",
-    redoc_url="/api/v1/redoc"
+    openapi_url="/openapi.json",
+    docs_url="/docs",
+    redoc_url="/redoc"
 )
 
-# Configure CORS for production
+# Configure CORS for local development
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://ai-agent-marketplace-9z6l1gh1.devinapps.com"],
+    allow_origins=["*"],  # Allow all origins for local development
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
