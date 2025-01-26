@@ -225,56 +225,128 @@ def extract_text_from_base64(base64_image: str) -> str:
 
 def detect_spanning_data(lines: List[str], start_idx: int, pattern: str) -> List[Tuple[str, int, int]]:
     """
-    Detect data that spans multiple rows with (1), (2) notation.
-    Returns list of (value, span_index, total_spans) tuples.
+    Detect and process multi-row data entries with (1), (2) notation.
+    Returns list of tuples: (text, span_index, total_spans)
+    
+    Example patterns from reference:
+    - "Min Loan Amount (1)", "Min Loan Amount (2)"
+    - "Residual Income (1)", "Residual Income (2)"
+    - "No Housing History (1)", "No Housing History (2)"
     """
+    # Initialize result list
     spanning_data = []
+    
+    # Get the initial line
     current_line = lines[start_idx].strip()
+    if not current_line:
+        return []
     
-    # Check if current line has spanning notation
-    base_match = re.match(f"{pattern}.*?(?:\((\d+)\))?$", current_line)
-    if not base_match:
-        return [(current_line, 0, 1)]
-        
-    # Found spanning data, collect all related entries
-    span_index = 1
-    max_span_index = 1
+    # Look ahead up to 5 lines to find related entries
+    look_ahead = min(5, len(lines) - start_idx)
+    related_entries = []
+    base_text = None
+    has_indexed_entries = False
     
-    # First pass: find all related entries and determine total spans
-    while start_idx + span_index < len(lines):
-        next_line = lines[start_idx + span_index].strip()
-        span_match = re.match(f"{pattern}.*?\((\d+)\)$", next_line)
-        if not span_match:
+    # First pass: collect all related entries and identify headers/values
+    headers = []
+    values = []
+    
+    for i in range(look_ahead):
+        if start_idx + i >= len(lines):
             break
-        current_span = int(span_match.group(1))
-        max_span_index = max(max_span_index, current_span)
-        spanning_data.append((next_line, current_span, 0))  # Temporary total of 0
-        span_index += 1
-    
-    # Update all entries with the correct total
-    if spanning_data:
-        # Add the first entry if it wasn't already included
-        if base_match.group(1):  # Has (1) notation
-            spanning_data.insert(0, (current_line, int(base_match.group(1)), max_span_index))
-        else:
-            spanning_data.insert(0, (current_line, 1, max_span_index))
             
-        # Update all entries with the correct total
-        spanning_data = [(value, idx, max_span_index) for value, idx, _ in spanning_data]
+        line = lines[start_idx + i].strip()
+        if not line:
+            continue
+            
+        # Extract base text and check for index
+        current_base = re.sub(r'\s*\(\d+\)\s*$', '', line)
+        index_match = re.search(r'\((\d+)\)$', line)
+        current_index = int(index_match.group(1)) if index_match else 0
+        
+        if current_index > 0:
+            has_indexed_entries = True
+        
+        # Only process lines that match our pattern
+        if re.search(pattern, line):
+            # If this is our first pattern match, set it as base text
+            if base_text is None:
+                base_text = current_base
+            
+            # Categorize as header or value
+            if not re.match(r'^\$|\d', current_base):
+                headers.append((current_base, current_index, line))
+            else:
+                values.append((current_base, current_index, line))
+    
+    # If no entries found, return empty list
+    if not headers and not values:
+        return []
+        
+    # If only one entry total and no indices, return as single entry
+    if len(headers) + len(values) == 1 and not has_indexed_entries:
+        return [(headers[0][2] if headers else values[0][2], 0, 1)]
+    
+    # Get all non-zero indices and find the maximum
+    all_indices = [idx for _, idx, _ in headers + values if idx > 0]
+    max_index = max(all_indices) if all_indices else len(headers + values)
+    
+    # Process entries
+    processed_entries = []
+    seen_indices = set()
+    
+    # First, get the base header text if available
+    header_base = headers[0][0] if headers else None
+    
+    # Special case: If we have a header without index and a value with index 1,
+    # use the header text for index 1 instead of the value
+    if header_base and any(idx == 0 for _, idx, _ in headers) and any(idx == 1 for _, idx, _ in values):
+        processed_entries.append((f"{header_base} (1)", 1, max_index))
+        seen_indices.add(1)
+        
+        # Add remaining indexed entries
+        for entries in [headers, values]:
+            for base, idx, line in entries:
+                if idx > 1 and idx not in seen_indices:
+                    if entries == headers:
+                        processed_entries.append((f"{base} ({idx})", idx, max_index))
+                    else:
+                        processed_entries.append((line, idx, max_index))
+                    seen_indices.add(idx)
     else:
-        # No spanning data found, treat as single value
-        spanning_data = [(current_line, 0, 1)]
+        # Handle entries with explicit indices first
+        for entries in [headers, values]:
+            for base, idx, line in entries:
+                if idx > 0 and idx not in seen_indices:
+                    if entries == headers:
+                        processed_entries.append((f"{base} ({idx})", idx, max_index))
+                    else:
+                        processed_entries.append((line, idx, max_index))
+                    seen_indices.add(idx)
+        
+        # Then handle implicit indices
+        if has_indexed_entries and 1 not in seen_indices:
+            # If we have a header without index, use it for index 1
+            if header_base and any(idx == 0 for _, idx, _ in headers):
+                processed_entries.append((f"{header_base} (1)", 1, max_index))
+                seen_indices.add(1)
+            # Otherwise use the first value without index
+            elif values and any(idx == 0 for _, idx, _ in values):
+                for base, idx, line in values:
+                    if idx == 0:
+                        processed_entries.append((line, 1, max_index))
+                        seen_indices.add(1)
+                        break
+        elif not has_indexed_entries:
+            # No indexed entries - use header if available, otherwise first value
+            if headers:
+                return [(headers[0][2], 0, 1)]
+            else:
+                return [(values[0][2], 0, 1)]
     
-    # Sort by span index and validate sequence
-    spanning_data.sort(key=lambda x: x[1] if x[1] > 0 else float('inf'))
-    
-    # Validate sequence integrity
-    if len(spanning_data) > 1:
-        indices = [idx for _, idx, _ in spanning_data if idx > 0]
-        if indices != list(range(1, len(indices) + 1)):
-            logger.warning(f"Inconsistent spanning data sequence detected: {indices}")
-            
-    return spanning_data
+    # Sort by index and return
+    processed_entries.sort(key=lambda x: x[1])
+    return processed_entries
 
 def parse_ltv_section(text: str) -> Dict:
     """Parse LTV requirements from text with enhanced pattern matching and multi-row data support."""
