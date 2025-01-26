@@ -23,8 +23,7 @@ export function RegisterAgent() {
     description: "",
     version: "",
     capabilities: [],
-    health_check_endpoint: "",
-    invocation_endpoint: "",
+    base_url: "",
     organization: "",
     contact_email: "",
     website: "",
@@ -66,8 +65,7 @@ export function RegisterAgent() {
         description: "",
         version: "",
         capabilities: [],
-        health_check_endpoint: "",
-        invocation_endpoint: "",
+        base_url: "",
         organization: "",
         contact_email: "",
         website: "",
@@ -164,27 +162,15 @@ export function RegisterAgent() {
             </div>
           </div>
           <div className="space-y-2">
-            <Label htmlFor="health_check_endpoint">Health Check Endpoint</Label>
+            <Label htmlFor="base_url">Base URL</Label>
             <Input
-              id="health_check_endpoint"
+              id="base_url"
               type="url"
-              value={formData.health_check_endpoint}
-              onChange={(e) => setFormData({ ...formData, health_check_endpoint: e.target.value })}
+              value={formData.base_url}
+              onChange={(e) => setFormData({ ...formData, base_url: e.target.value })}
               required
               disabled={loading}
-              placeholder="https://your-agent.com/health"
-            />
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="invocation_endpoint">Invocation Endpoint</Label>
-            <Input
-              id="invocation_endpoint"
-              type="url"
-              value={formData.invocation_endpoint}
-              onChange={(e) => setFormData({ ...formData, invocation_endpoint: e.target.value })}
-              required
-              disabled={loading}
-              placeholder="https://your-agent.com/invoke"
+              placeholder="https://your-agent.com"
             />
           </div>
           <div className="space-y-4">

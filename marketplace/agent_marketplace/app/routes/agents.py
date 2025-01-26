@@ -24,8 +24,47 @@ router = APIRouter(prefix="/agents", tags=["agents"])
 @router.post("/register", response_model=AgentResponse)
 async def register_agent(agent: AgentRegistration):
     try:
-        # Convert model to dict
+        # Convert model to dict and derive endpoints
         agent_dict = agent.model_dump()
+        base_url = str(agent_dict["base_url"]).rstrip("/")  # Remove trailing slash if present
+        
+        # Derive standard endpoints
+        agent_dict["health_check_endpoint"] = f"{base_url}/health"
+        agent_dict["invocation_endpoint"] = f"{base_url}/invoke"
+        capabilities_url = f"{base_url}/capabilities"
+        
+        # Fetch and validate capabilities
+        try:
+            import requests
+            logger.info(f"Fetching capabilities from: {capabilities_url}")
+            response = requests.get(capabilities_url, timeout=5)
+            response.raise_for_status()
+            capabilities = response.json()
+            
+            # Validate capabilities match
+            if capabilities.get("name") != agent_dict["agent_name"]:
+                logger.warning(f"Agent name mismatch: registered={agent_dict['agent_name']}, endpoint={capabilities.get('name')}")
+            
+            if capabilities.get("version") != agent_dict["version"]:
+                logger.warning(f"Version mismatch: registered={agent_dict['version']}, endpoint={capabilities.get('version')}")
+            
+            # Update with validated schemas and capabilities
+            agent_dict["input_schema"] = capabilities.get("input_schema", agent_dict["input_schema"])
+            agent_dict["output_schema"] = capabilities.get("output_schema", agent_dict["output_schema"])
+            agent_dict["capabilities"] = capabilities.get("capabilities", agent_dict["capabilities"])
+            
+            # Store rate limits if provided
+            if "rate_limits" in capabilities:
+                agent_dict["rate_limits"] = capabilities["rate_limits"]
+            
+            logger.info("Successfully validated agent capabilities")
+            
+        except Exception as e:
+            logger.error(f"Failed to fetch or validate capabilities: {str(e)}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Failed to validate agent capabilities: {str(e)}"
+            )
         
         # Compute embedding with detailed logging
         logger.info(f"Computing embedding for agent: {agent_dict['agent_name']}")
@@ -253,30 +292,67 @@ async def invoke_agent(
         )
 
     try:
-        # In production, we would:
-        # 1. Validate input against agent's input_schema
-        # 2. Apply rate limiting
-        # 3. Make actual HTTP request to agent's invocation endpoint
-        # 4. Validate response against output_schema
-        # For now, return a mock successful response
-        return InvocationResponse(
-            status="success",
-            result={
-                "message": "Agent invoked successfully",
-                "input_received": request.input,
-                "agent": {
-                    "id": agent_id,
-                    "name": agent.get("agent_name"),
-                    "version": agent.get("version")
-                }
-            },
-            trace_id=request.trace_id
-        )
+        import requests
+        from jsonschema import validate, ValidationError
+
+        # Get the agent's invocation endpoint
+        invocation_endpoint = agent.get("invocation_endpoint")
+        if not invocation_endpoint:
+            raise HTTPException(
+                status_code=500,
+                detail="Agent invocation endpoint not found"
+            )
+
+        logger.info(f"Forwarding request to agent endpoint: {invocation_endpoint}")
+        
+        # Forward the request to the agent
+        try:
+            invocation_res = requests.post(
+                invocation_endpoint,
+                json={
+                    "input": request.input,
+                    "trace_id": request.trace_id,
+                    "timeout": request.timeout
+                },
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "application/json"
+                },
+                timeout=request.timeout or 30
+            )
+            
+            # Check if the request was successful
+            invocation_res.raise_for_status()
+            
+            # Parse the response
+            agent_resp = invocation_res.json()
+            logger.info(f"Agent response received: {agent_resp}")
+            
+            # Convert to InvocationResponse model
+            return InvocationResponse(**agent_resp)
+            
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Failed to invoke agent: {str(e)}")
+            return InvocationResponse(
+                status="error",
+                error={
+                    "code": "INVOCATION_ERROR",
+                    "message": "Failed to invoke agent",
+                    "details": {
+                        "error_type": type(e).__name__,
+                        "error_message": str(e),
+                        "agent_id": agent_id
+                    }
+                },
+                trace_id=request.trace_id
+            )
+            
     except Exception as e:
+        logger.error(f"Error in invoke_agent: {str(e)}")
         return InvocationResponse(
             status="error",
             error={
-                "code": "INVOCATION_ERROR",
+                "code": "INTERNAL_ERROR",
                 "message": str(e),
                 "details": {
                     "error_type": type(e).__name__,

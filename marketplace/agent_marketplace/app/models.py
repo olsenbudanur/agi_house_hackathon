@@ -20,8 +20,7 @@ class AgentRegistration(BaseModel):
     capabilities: List[str]
     input_schema: Dict[str, Any]
     output_schema: Dict[str, Any]
-    health_check_endpoint: HttpUrl
-    invocation_endpoint: HttpUrl
+    base_url: HttpUrl
     provider_details: ProviderDetails
 
 class AgentResponse(BaseModel):

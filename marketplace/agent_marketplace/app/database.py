@@ -20,9 +20,16 @@ class InMemoryDB:
         agent_data["registration_timestamp"] = datetime.utcnow()
         agent_data["agent_id"] = agent_id
         
+        # Debug log before storage
+        logger.info(f"Storing agent data with input schema: {agent_data.get('input_schema')}")
+        
         # Store the agent data with its embedding
         self.agents[agent_id] = agent_data
         self.tokens[marketplace_token] = agent_id
+        
+        # Verify storage
+        stored = self.agents[agent_id]
+        logger.info(f"Stored agent data input schema: {stored.get('input_schema')}")
         
         # Log storage details
         logger.info(f"Stored agent data for {agent_data['agent_name']}")
