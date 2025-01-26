@@ -1,0 +1,84 @@
+# Semantic Search Implementation Notes
+
+## Current Architecture
+1. Backend (FastAPI)
+   - In-memory database storing agent information
+   - /agents/list endpoint with basic filtering
+   - Agent model includes: name, description, capabilities, schemas
+
+2. Frontend (React)
+   - Basic text search in AgentList.tsx
+   - Matches against name, description, capabilities
+   - Simple string inclusion checking
+
+## Requirements for Semantic Search
+1. Natural language queries
+   - Example: "Find me bot that does sentiment analysis"
+   - Should match against agent descriptions and capabilities
+   - Need semantic understanding, not just keyword matching
+
+2. Fields to Search
+   - Agent name
+   - Description
+   - Capabilities (tags)
+   - Input/output schemas (optional)
+
+3. Technical Considerations
+   - Embedding Model Options:
+     * sentence-transformers/all-MiniLM-L6-v2 (fast, lightweight)
+     * sentence-transformers/all-mpnet-base-v2 (more accurate)
+   - Storage Options:
+     * In-memory (consistent with current approach)
+     * Vector database (more scalable but adds complexity)
+   - Computation Options:
+     * Pre-compute embeddings during registration
+     * Real-time embedding calculation
+   - Search Process:
+     1. Convert user query to embedding
+     2. Compare with agent embeddings
+     3. Return top N matches above threshold
+
+4. Implementation Approach
+   - Use sentence-transformers for embeddings
+   - Store embeddings in memory (consistent with current DB)
+   - Pre-compute embeddings during agent registration
+   - Add new /agents/semantic-search endpoint
+   - Enhance frontend search to use semantic endpoint
+
+5. Code Changes Needed
+   Backend:
+   - Add sentence-transformers dependency
+   - Extend InMemoryDB to store embeddings
+   - Add semantic search endpoint
+   - Compute embeddings during registration
+
+   Frontend:
+   - Add semantic search API call
+   - Update search UI for natural language queries
+   - Display relevance scores (optional)
+
+6. Example Implementation
+```python
+from sentence_transformers import SentenceTransformer
+model = SentenceTransformer('all-MiniLM-L6-v2')
+
+def compute_embedding(text):
+    return model.encode(text)
+
+def semantic_search(query, agents):
+    query_embedding = compute_embedding(query)
+    results = []
+    for agent in agents:
+        score = cosine_similarity(query_embedding, agent.embedding)
+        if score > THRESHOLD:
+            results.append((agent, score))
+    return sorted(results, key=lambda x: x[1], reverse=True)
+```
+
+7. Testing Strategy
+   - Unit tests for embedding computation
+   - Integration tests for search endpoint
+   - Example queries:
+     * "Find me bot that does sentiment analysis"
+     * "I need an agent for text summarization"
+     * "Which bot can process images?"
