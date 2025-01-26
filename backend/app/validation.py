@@ -15,9 +15,25 @@ def validate_fico(score: int) -> bool:
     """Validate FICO score."""
     return 300 <= score <= 850
 
-def validate_loan_amount(amount: float) -> bool:
-    """Validate loan amount."""
-    return 10000 <= amount <= 100000000
+def validate_loan_amount(amount: Dict) -> bool:
+    """Validate loan amount with support for spanning data."""
+    try:
+        # Extract numeric value from string (remove $ and ,)
+        value_str = amount["value"].replace("$", "").replace(",", "")
+        numeric_value = float(value_str)
+        
+        # Basic range validation
+        if not (10000 <= numeric_value <= 100000000):
+            return False
+            
+        # Validate spanning data if present
+        if amount["span_index"] is not None:
+            if amount["span_index"] < 1 or amount["span_total"] < amount["span_index"]:
+                return False
+                
+        return True
+    except (ValueError, KeyError, TypeError):
+        return False
 
 def validate_dti(dti: float) -> bool:
     """Validate Debt-to-Income ratio."""

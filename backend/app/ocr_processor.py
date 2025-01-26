@@ -223,24 +223,77 @@ def extract_text_from_base64(base64_image: str) -> str:
         logger.error(f"Error in base64 image text extraction: {str(e)}")
         raise
 
+def detect_spanning_data(lines: List[str], start_idx: int, pattern: str) -> List[Tuple[str, int, int]]:
+    """
+    Detect data that spans multiple rows with (1), (2) notation.
+    Returns list of (value, span_index, total_spans) tuples.
+    """
+    spanning_data = []
+    current_line = lines[start_idx].strip()
+    
+    # Check if current line has spanning notation
+    base_match = re.match(f"{pattern}.*?(?:\((\d+)\))?$", current_line)
+    if not base_match:
+        return [(current_line, 0, 1)]
+        
+    # Found spanning data, collect all related entries
+    span_index = 1
+    max_span_index = 1
+    
+    # First pass: find all related entries and determine total spans
+    while start_idx + span_index < len(lines):
+        next_line = lines[start_idx + span_index].strip()
+        span_match = re.match(f"{pattern}.*?\((\d+)\)$", next_line)
+        if not span_match:
+            break
+        current_span = int(span_match.group(1))
+        max_span_index = max(max_span_index, current_span)
+        spanning_data.append((next_line, current_span, 0))  # Temporary total of 0
+        span_index += 1
+    
+    # Update all entries with the correct total
+    if spanning_data:
+        # Add the first entry if it wasn't already included
+        if base_match.group(1):  # Has (1) notation
+            spanning_data.insert(0, (current_line, int(base_match.group(1)), max_span_index))
+        else:
+            spanning_data.insert(0, (current_line, 1, max_span_index))
+            
+        # Update all entries with the correct total
+        spanning_data = [(value, idx, max_span_index) for value, idx, _ in spanning_data]
+    else:
+        # No spanning data found, treat as single value
+        spanning_data = [(current_line, 0, 1)]
+    
+    # Sort by span index and validate sequence
+    spanning_data.sort(key=lambda x: x[1] if x[1] > 0 else float('inf'))
+    
+    # Validate sequence integrity
+    if len(spanning_data) > 1:
+        indices = [idx for _, idx, _ in spanning_data if idx > 0]
+        if indices != list(range(1, len(indices) + 1)):
+            logger.warning(f"Inconsistent spanning data sequence detected: {indices}")
+            
+    return spanning_data
+
 def parse_ltv_section(text: str) -> Dict:
-    """Parse LTV requirements from text with enhanced pattern matching."""
-    # Initialize with default structure
+    """Parse LTV requirements from text with enhanced pattern matching and multi-row data support."""
+    # Initialize with default structure using SpanningData format for loan amounts
     ltv_data = {
         "primary_residence": {
-            "purchase": {"max_ltv": "85%", "min_fico": 740, "max_loan": 1000000},
-            "rate_and_term": {"max_ltv": "85%", "min_fico": 740, "max_loan": 1000000},
-            "cash_out": {"max_ltv": "75%", "min_fico": 740, "max_loan": 1000000}
+            "purchase": {"max_ltv": "85%", "min_fico": 740, "max_loan": {"value": "$1,000,000", "span_index": None, "span_total": None}},
+            "rate_and_term": {"max_ltv": "85%", "min_fico": 740, "max_loan": {"value": "$1,000,000", "span_index": None, "span_total": None}},
+            "cash_out": {"max_ltv": "75%", "min_fico": 740, "max_loan": {"value": "$1,000,000", "span_index": None, "span_total": None}}
         },
         "second_home": {
-            "purchase": {"max_ltv": "75%", "min_fico": 740, "max_loan": 1000000},
-            "rate_and_term": {"max_ltv": "75%", "min_fico": 740, "max_loan": 1000000},
-            "cash_out": {"max_ltv": "70%", "min_fico": 740, "max_loan": 1000000}
+            "purchase": {"max_ltv": "75%", "min_fico": 740, "max_loan": {"value": "$1,000,000", "span_index": None, "span_total": None}},
+            "rate_and_term": {"max_ltv": "75%", "min_fico": 740, "max_loan": {"value": "$1,000,000", "span_index": None, "span_total": None}},
+            "cash_out": {"max_ltv": "70%", "min_fico": 740, "max_loan": {"value": "$1,000,000", "span_index": None, "span_total": None}}
         },
         "investment": {
-            "purchase": {"max_ltv": "75%", "min_fico": 740, "max_loan": 1000000},
-            "rate_and_term": {"max_ltv": "75%", "min_fico": 740, "max_loan": 1000000},
-            "cash_out": {"max_ltv": "70%", "min_fico": 740, "max_loan": 1000000}
+            "purchase": {"max_ltv": "75%", "min_fico": 740, "max_loan": {"value": "$1,000,000", "span_index": None, "span_total": None}},
+            "rate_and_term": {"max_ltv": "75%", "min_fico": 740, "max_loan": {"value": "$1,000,000", "span_index": None, "span_total": None}},
+            "cash_out": {"max_ltv": "70%", "min_fico": 740, "max_loan": {"value": "$1,000,000", "span_index": None, "span_total": None}}
         }
     }
     
@@ -341,11 +394,20 @@ def parse_ltv_section(text: str) -> Dict:
             current_property_type = "investment"
             continue
             
-        # Enhanced loan amount detection
+        # Enhanced loan amount detection with spanning data support
         loan_amount_match = None
         if "$" in line or any(x in line.upper() for x in ["MM", "MILLION", "000"]):
-            # Define comprehensive amount patterns
-            amount_patterns = [
+            # Check for spanning loan amount data
+            spanning_amounts = detect_spanning_data(
+                lines, i,
+                r"(?:[\$]?\s*(?:\d{1,3}(?:,\d{3})*(?:\.\d+)?)|(?:[\$]?\s*\d+(?:\.\d+)?\s*MM?))"
+            )
+            
+            if spanning_amounts:
+                # Convert the detected amounts to numeric values
+                for amount_str, span_idx, total_spans in spanning_amounts:
+                    # Define comprehensive amount patterns
+                    amount_patterns = [
                 # Standard notation
                 (r'[\$]?\s*(?:1|one)[,.]?000[,.]?000', 1000000),
                 (r'[\$]?\s*(?:1|one)[,.]?5(?:00[,.]?000)?', 1500000),
@@ -364,8 +426,20 @@ def parse_ltv_section(text: str) -> Dict:
             
             for pattern, amount in amount_patterns:
                 if re.search(pattern, line, re.IGNORECASE):
-                    current_loan_amount = amount
-                    logger.debug(f"Found loan amount: ${current_loan_amount:,}")
+                    if span_idx > 0:
+                        current_loan_amount = {
+                            "value": f"${amount:,}",
+                            "span_index": span_idx,
+                            "span_total": total_spans
+                        }
+                        logger.debug(f"Found spanning loan amount: {current_loan_amount}")
+                    else:
+                        current_loan_amount = {
+                            "value": f"${amount:,}",
+                            "span_index": None,
+                            "span_total": None
+                        }
+                        logger.debug(f"Found single loan amount: {current_loan_amount}")
                     break
                     
         # Look for FICO and LTV combinations
