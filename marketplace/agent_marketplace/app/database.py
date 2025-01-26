@@ -62,7 +62,22 @@ class InMemoryDB:
     
     def verify_token(self, token: str) -> bool:
         """Verify token exists in storage."""
-        return token in self.tokens
+        logger.info(f"Verifying token: {token}")
+        logger.debug(f"Available tokens: {list(self.tokens.keys())}")
+        result = token in self.tokens
+        logger.info(f"Token verification result: {result}")
+        return result
+        
+    def get_token_for_agent(self, agent_id: str) -> Optional[str]:
+        """Get the marketplace token for a given agent ID."""
+        logger.info(f"Looking up token for agent: {agent_id}")
+        # Find the token that maps to this agent_id
+        for token, aid in self.tokens.items():
+            if aid == agent_id:
+                logger.info(f"Found token for agent {agent_id}")
+                return token
+        logger.warning(f"No token found for agent {agent_id}")
+        return None
 
 # Global instance
 db = InMemoryDB()
