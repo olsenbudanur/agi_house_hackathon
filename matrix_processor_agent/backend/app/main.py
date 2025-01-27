@@ -2,6 +2,8 @@ from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, Request, 
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
+from json.decoder import JSONDecodeError
+from typing import Dict, Any, Optional
 import os
 import logging
 import datetime
@@ -15,10 +17,21 @@ from io import BytesIO
 from app.validation import validate_matrix_data, format_validation_response
 from app.matrix_types import (
     MatrixResponse, ErrorResponse, ProcessingMethod, MatrixData,
-    AgentStatus, HealthCheck
+    AgentStatus, HealthCheck, AgentCapabilities, InvocationRequest,
+    InvocationResponse, ErrorDetails
 )
 from app.ocr_processor import process_matrix_with_ocr
 import time
+
+# Load environment variables
+load_dotenv(find_dotenv())
+
+# Initialize OpenAI client
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Global start time for uptime calculation
 START_TIME = time.time()
@@ -103,6 +116,20 @@ app.add_middleware(
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     trace_id = request.headers.get("X-Trace-ID", "unknown")
+    # Clean up validation errors to remove body-level errors
+    errors = [err for err in exc.errors() if not (
+        isinstance(err.get('loc'), tuple) and 
+        len(err['loc']) > 0 and 
+        err['loc'][0] == 'body'
+    )]
+    
+    if not errors:
+        # If all errors were body-level, this is likely a JSON parsing error
+        errors = [{
+            "type": "json_parse_error",
+            "msg": "Invalid JSON format in request body"
+        }]
+    
     return JSONResponse(
         status_code=400,
         content={
@@ -112,7 +139,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
                 "message": "Request validation failed",
                 "details": {
                     "error_type": "ValidationError",
-                    "errors": exc.errors()
+                    "errors": errors
                 }
             },
             "trace_id": trace_id
@@ -269,26 +296,87 @@ async def health_check(rate_limit: bool = Depends(rate_limiter)) -> HealthCheck:
 @app.get("/capabilities")
 async def get_capabilities(rate_limit: bool = Depends(rate_limiter)) -> AgentCapabilities:
     """Get agent capabilities endpoint for the marketplace."""
+    # Define agent configuration if not already defined
+    agent_config = {
+        "name": "MatrixProcessorAgent",
+        "version": "1.0.0",
+        "capabilities": [
+            "matrix-parsing",
+            "pdf-to-image-conversion"
+        ],
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "file_url": {"type": "string", "format": "uri"}
+            },
+            "required": ["file_url"]
+        },
+        "output_schema": {
+            "type": "object",
+            "properties": {
+                "data": {"type": "object"},
+                "validation": {"type": "object"}
+            }
+        }
+    }
+    
     return AgentCapabilities(
-        name=AGENT_CONFIG["name"],
-        version=AGENT_CONFIG["version"],
-        capabilities=AGENT_CONFIG["capabilities"],
-        input_schema=AGENT_CONFIG["input_schema"],
-        output_schema=AGENT_CONFIG["output_schema"],
+        name=agent_config["name"],
+        version=agent_config["version"],
+        capabilities=agent_config["capabilities"],
+        input_schema=agent_config["input_schema"],
+        output_schema=agent_config["output_schema"],
         rate_limits={
-            "requests_per_second": MAX_REQUESTS_PER_WINDOW / RATE_LIMIT_WINDOW,
-            "burst_limit": MAX_REQUESTS_PER_WINDOW
+            "requests_per_second": 10,  # Fixed integer value as per spec
+            "burst_limit": 20  # Fixed integer value as per spec
         }
     )
 
 @app.post("/invoke")
 async def invoke_agent(
-    request: InvocationRequest,
+    request: Request,
     rate_limit: bool = Depends(rate_limiter),
-    marketplace_token: Optional[str] = Header(None, alias="X-Marketplace-Token")
+    marketplace_token: Optional[str] = Header(None, alias="X-Marketplace-Token"),
+    trace_id: str = Header(..., alias="X-Trace-ID")
 ) -> InvocationResponse:
     """Invoke agent functionality endpoint for the marketplace."""
-    logger.info(f"Processing invocation request with trace_id: {request.trace_id}")
+    logger.info(f"Processing invocation request with trace_id: {trace_id}")
+    
+    try:
+        # Parse and validate request body
+        request_body = await request.json()
+        if not isinstance(request_body, dict):
+            return InvocationResponse(
+                status="error",
+                error=ErrorDetails(
+                    code="INVALID_JSON",
+                    message="Request body must be a JSON object",
+                    details={"error_type": "JSONDecodeError"}
+                ),
+                trace_id=trace_id
+            )
+            
+        request_model = InvocationRequest(**request_body)
+    except JSONDecodeError:
+        return InvocationResponse(
+            status="error",
+            error=ErrorDetails(
+                code="INVALID_JSON",
+                message="Invalid JSON in request body",
+                details={"error_type": "JSONDecodeError"}
+            ),
+            trace_id=trace_id
+        )
+    except ValidationError as e:
+        return InvocationResponse(
+            status="error",
+            error=ErrorDetails(
+                code="VALIDATION_ERROR",
+                message="Invalid request format",
+                details={"error_type": "ValidationError", "errors": e.errors()}
+            ),
+            trace_id=trace_id
+        )
     
     # Validate marketplace token
     if not marketplace_token or not marketplace_token.strip():
@@ -299,11 +387,11 @@ async def invoke_agent(
                 message="Missing or invalid marketplace token",
                 details={"error_type": "AuthenticationError"}
             ),
-            trace_id=request.trace_id
+            trace_id=trace_id
         )
     
     # Extract and validate file_url
-    file_url = request.input.get("file_url")
+    file_url = request_model.input.get("file_url")
     if not file_url:
         return InvocationResponse(
             status="error",
@@ -315,14 +403,14 @@ async def invoke_agent(
                     "required_fields": ["file_url"]
                 }
             ),
-            trace_id=request.trace_id
+            trace_id=trace_id
         )
     
     try:
         # Download file from URL
         import httpx
         async with httpx.AsyncClient() as client:
-            response = await client.get(file_url, timeout=request.timeout or 30)
+            response = await client.get(file_url, timeout=request_model.timeout or 30)
             response.raise_for_status()
             content_type = response.headers.get("content-type", "").lower()
             contents = response.content
@@ -344,7 +432,7 @@ async def invoke_agent(
                         "file_size": len(contents)
                     }
                 },
-                trace_id=request.trace_id
+                trace_id=trace_id
             )
             
     except httpx.TimeoutException:
@@ -355,10 +443,10 @@ async def invoke_agent(
                 message="Request timed out while downloading file",
                 details={
                     "error_type": "TimeoutError",
-                    "timeout_seconds": request.timeout or 30
+                    "timeout_seconds": request_model.timeout or 30
                 }
             ),
-            trace_id=request.trace_id
+            trace_id=trace_id
         )
     except httpx.HTTPError as e:
         return InvocationResponse(
@@ -371,7 +459,7 @@ async def invoke_agent(
                     "status_code": e.response.status_code if hasattr(e, 'response') else None
                 }
             ),
-            trace_id=request.trace_id
+            trace_id=trace_id
         )
     except Exception as e:
         logger.error(f"Error processing request: {str(e)}")
@@ -385,7 +473,7 @@ async def invoke_agent(
                     "error_message": str(e)
                 }
             ),
-            trace_id=request.trace_id
+            trace_id=trace_id
         )
 
 @app.get("/healthz")
@@ -543,10 +631,6 @@ async def process_matrix(
     file: UploadFile = File(...),
     rate_limit: bool = Depends(rate_limiter)
 ):
-    """Process an uploaded matrix image using OCR and GPT-4 Vision analysis."""
-    start_time = time.time()
-    request_counts["total"] += 1
-    try:
     """
     Process an uploaded matrix image using OCR and GPT-4 Vision analysis.
     
@@ -556,6 +640,8 @@ async def process_matrix(
     Returns:
         MatrixResponse: Structured data extracted from the matrix with validation results
     """
+    start_time = time.time()
+    request_counts["total"] += 1
     try:
         # Read the uploaded file
         contents = await file.read()

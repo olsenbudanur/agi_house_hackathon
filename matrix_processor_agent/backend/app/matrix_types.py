@@ -29,7 +29,6 @@ class InvocationRequest(BaseModel):
     input: Dict[str, Any]
     callback_url: Optional[str] = None
     timeout: Optional[int] = 30
-    trace_id: str
 
 class ErrorDetails(BaseModel):
     """Model for error details in responses."""
