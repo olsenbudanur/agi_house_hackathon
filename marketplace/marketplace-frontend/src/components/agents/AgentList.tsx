@@ -4,7 +4,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { AlertCircle, RefreshCw, Search } from "lucide-react"
+import { AlertCircle, RefreshCw, Search, TrendingUp } from "lucide-react"
 import { Agent } from "../../types"
 import { listAgents, semanticSearch } from "../../lib/api"
 
@@ -51,21 +51,28 @@ export function AgentList() {
       return
     }
 
+    console.log(`Performing ${semanticMode ? 'semantic' : 'basic'} search for:`, query)
+
     try {
       setIsSearching(true)
       setError(null)
-      const results = semanticMode
-        ? await semanticSearch(query)
-        : agents.filter(agent => {
-            const searchTermLower = query.toLowerCase()
-            return (
-              (agent.name?.toLowerCase() || '').includes(searchTermLower) ||
-              (agent.description?.toLowerCase() || '').includes(searchTermLower) ||
-              (agent.capabilities || []).some(cap => 
-                (cap?.toLowerCase() || '').includes(searchTermLower)
-              )
+      let results;
+      if (semanticMode) {
+        console.log('Performing semantic search...');
+        results = await semanticSearch(query);
+        console.log('Semantic search results:', results);
+      } else {
+        results = agents.filter(agent => {
+          const searchTermLower = query.toLowerCase()
+          return (
+            (agent.name?.toLowerCase() || '').includes(searchTermLower) ||
+            (agent.description?.toLowerCase() || '').includes(searchTermLower) ||
+            (agent.capabilities || []).some(cap => 
+              (cap?.toLowerCase() || '').includes(searchTermLower)
             )
-          })
+          )
+        });
+      }
       setAgents(results)
     } catch (error) {
       const errorMessage = error instanceof Error 
@@ -75,10 +82,8 @@ export function AgentList() {
       console.error('Search error:', error)
       setError(errorMessage)
       
-      // Reset agents to initial state on error if in semantic mode
-      if (semanticMode) {
-        fetchAgents()
-      }
+      // Reset agents to initial state on error
+      fetchAgents()
     } finally {
       setIsSearching(false)
     }

@@ -2,10 +2,9 @@ from fastapi import FastAPI, HTTPException, Depends, Request, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
-from datetime import datetime, timedelta
+from datetime import datetime
 import logging
 import time
-from fastapi.security import APIKeyHeader
 from typing import Optional
 import asyncio
 from collections import defaultdict
@@ -67,83 +66,7 @@ async def rate_limiter(request: Request):
     rate_limit_storage[client_ip].append(now)
     return True
 
-app = FastAPI(title="Mock AI Agent", version="1.0.0")
-
-@app.exception_handler(RequestValidationError)
-async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    trace_id = "unknown"
-    if isinstance(request.state, dict) and "trace_id" in request.state:
-        trace_id = request.state["trace_id"]
-    
-    response = InvocationResponse(
-        status="error",
-        error=ErrorDetails(
-            code="VALIDATION_ERROR",
-            message="Request validation failed",
-            details={
-                "error_type": "ValidationError",
-                "errors": exc.errors()
-            }
-        ),
-        trace_id=trace_id
-    )
-    return JSONResponse(
-        status_code=400,
-        content=response.model_dump()
-    )
-
-@app.exception_handler(HTTPException)
-async def http_exception_handler(request: Request, exc: HTTPException):
-    trace_id = "unknown"
-    if isinstance(request.state, dict) and "trace_id" in request.state:
-        trace_id = request.state["trace_id"]
-    
-    if isinstance(exc.detail, dict) and "error" in exc.detail:
-        return JSONResponse(
-            status_code=exc.status_code,
-            content=exc.detail
-        )
-        
-    response = InvocationResponse(
-        status="error",
-        error=ErrorDetails(
-            code="HTTP_ERROR",
-            message=str(exc.detail),
-            details={
-                "error_type": "HTTPException",
-                "status_code": exc.status_code
-            }
-        ),
-        trace_id=trace_id
-    )
-    return JSONResponse(
-        status_code=exc.status_code,
-        content=response.model_dump()
-    )
-
-@app.exception_handler(Exception)
-async def general_exception_handler(request: Request, exc: Exception):
-    logger.error(f"Unhandled exception: {str(exc)}")
-    trace_id = "unknown"
-    if isinstance(request.state, dict) and "trace_id" in request.state:
-        trace_id = request.state["trace_id"]
-    
-    response = InvocationResponse(
-        status="error",
-        error=ErrorDetails(
-            code="INTERNAL_ERROR",
-            message="An internal server error occurred",
-            details={
-                "error_type": type(exc).__name__,
-                "error_message": str(exc)
-            }
-        ),
-        trace_id=trace_id
-    )
-    return JSONResponse(
-        status_code=500,
-        content=response.model_dump()
-    )
+app = FastAPI(title="Funding Manager Agent", version="1.0.0")
 
 # Configure CORS
 app.add_middleware(
@@ -156,28 +79,74 @@ app.add_middleware(
 
 # Mock agent configuration
 MOCK_AGENT_CONFIG = {
-    "name": "MockTextProcessor",
+    "name": "FundingManager",
     "version": "1.0.0",
-    "capabilities": ["text-processing", "sentiment-analysis"],
+    "description": "Manages loan funding and settlement processes",
+    "capabilities": ["fund-disbursement", "settlement-coordination", "wire-transfer", "post-funding-review"],
     "input_schema": {
         "type": "object",
         "properties": {
-            "text": {"type": "string"},
-            "analysis_type": {"type": "string", "enum": ["sentiment", "summary"]}
+            "loan_id": {"type": "string"},
+            "funding_amount": {"type": "number"},
+            "funding_date": {"type": "string", "format": "date"},
+            "disbursement_details": {
+                "type": "object",
+                "properties": {
+                    "recipient_name": {"type": "string"},
+                    "bank_name": {"type": "string"},
+                    "account_number": {"type": "string"},
+                    "routing_number": {"type": "string"},
+                    "wire_instructions": {"type": "string"}
+                },
+                "required": ["recipient_name", "bank_name", "account_number", "routing_number"]
+            },
+            "settlement_agent": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "company": {"type": "string"},
+                    "email": {"type": "string"},
+                    "phone": {"type": "string"}
+                },
+                "required": ["name", "company", "email"]
+            }
         },
-        "required": ["text", "analysis_type"]
+        "required": ["loan_id", "funding_amount", "funding_date", "disbursement_details"]
     },
     "output_schema": {
         "type": "object",
         "properties": {
-            "result": {"type": "string"},
-            "confidence": {"type": "number"}
+            "funding_status": {
+                "type": "string",
+                "enum": ["pending", "in_progress", "completed", "failed"]
+            },
+            "transaction_details": {
+                "type": "object",
+                "properties": {
+                    "transaction_id": {"type": "string"},
+                    "confirmation_number": {"type": "string"},
+                    "timestamp": {"type": "string"},
+                    "status_description": {"type": "string"}
+                }
+            },
+            "disbursement_confirmation": {
+                "type": "object",
+                "properties": {
+                    "amount_disbursed": {"type": "number"},
+                    "recipient_confirmation": {"type": "string"},
+                    "wire_reference": {"type": "string"}
+                }
+            },
+            "settlement_status": {
+                "type": "string",
+                "enum": ["pending", "confirmed", "completed"]
+            }
         }
     }
 }
 
 @app.get("/health")
-async def health_check(rate_limit: bool = Depends(rate_limiter), request: Request = None) -> HealthCheck:
+async def health_check(rate_limit: bool = Depends(rate_limiter)) -> HealthCheck:
     """Health check endpoint"""
     return HealthCheck(
         status=AgentStatus.HEALTHY,
@@ -190,7 +159,7 @@ async def health_check(rate_limit: bool = Depends(rate_limiter), request: Reques
     )
 
 @app.get("/capabilities")
-async def get_capabilities(rate_limit: bool = Depends(rate_limiter), request: Request = None) -> AgentCapabilities:
+async def get_capabilities(rate_limit: bool = Depends(rate_limiter)) -> AgentCapabilities:
     """Get agent capabilities"""
     return AgentCapabilities(
         name=MOCK_AGENT_CONFIG["name"],
@@ -208,19 +177,13 @@ async def get_capabilities(rate_limit: bool = Depends(rate_limiter), request: Re
 async def invoke_agent(
     request: InvocationRequest,
     rate_limit: bool = Depends(rate_limiter),
-    req: Request = None,
-    marketplace_token: Optional[str] = Header(None, alias="X-Marketplace-Token", description="Optional marketplace token")
+    marketplace_token: Optional[str] = Header(None, alias="X-Marketplace-Token")
 ) -> InvocationResponse:
     """Invoke agent functionality"""
-    # Log invocation request
     logger.info(f"Processing invocation request with trace_id: {request.trace_id}")
     
-    # Log and validate token
-    logger.info(f"Received marketplace token: {marketplace_token}")
-    
-    # In development mode, accept any non-empty token
+    # Validate token
     if not marketplace_token or not marketplace_token.strip():
-        logger.error("Missing or empty marketplace token")
         raise HTTPException(
             status_code=401,
             detail={
@@ -235,8 +198,6 @@ async def invoke_agent(
                 "trace_id": request.trace_id
             }
         )
-    
-    logger.info("Development mode: Token validation passed")
     
     try:
         # Validate input against schema
@@ -258,59 +219,67 @@ async def invoke_agent(
                 },
                 trace_id=request.trace_id
             )
-            
-        # Process the request
-        text = request.input.get("text", "")
-        analysis_type = request.input.get("analysis_type", "")
         
-        if analysis_type not in ["sentiment", "summary"]:
-            return InvocationResponse(
-                status="error",
-                error={
-                    "error": {
-                        "code": "INVALID_ANALYSIS_TYPE",
-                        "message": "Invalid analysis type specified",
-                        "details": {
-                            "error_type": "ValidationError",
-                            "allowed_types": ["sentiment", "summary"],
-                            "received_type": analysis_type
-                        }
-                    }
-                },
-                trace_id=request.trace_id
-            )
-            
-        if analysis_type == "sentiment":
-            result = "positive" if any(word in text.lower() for word in ["good", "love", "great", "excellent"]) else "negative"
-            confidence = 0.85 if any(word in text.lower() for word in ["good", "love", "great", "excellent"]) else 0.65
-        else:  # summary
-            result = f"Summary of: {text[:50]}..."
-            confidence = 0.9
+        # Process the request
+        loan_id = request.input["loan_id"]
+        funding_amount = request.input["funding_amount"]
+        funding_date = request.input["funding_date"]
+        disbursement_details = request.input["disbursement_details"]
+        settlement_agent = request.input.get("settlement_agent", {})
+        
+        # Mock funding process logic
+        # Generate mock transaction ID and confirmation number
+        import hashlib
+        transaction_id = hashlib.md5(f"{loan_id}-{funding_date}".encode()).hexdigest()[:12]
+        confirmation_number = f"FUND-{transaction_id[:6]}"
+        
+        # Mock wire reference
+        wire_reference = f"WIRE-{transaction_id[-6:]}"
+        
+        # Simulate funding status based on input validation
+        has_valid_wire = all(
+            disbursement_details.get(field)
+            for field in ["account_number", "routing_number", "wire_instructions"]
+        )
+        
+        has_settlement_agent = all(
+            settlement_agent.get(field)
+            for field in ["name", "company", "email"]
+        )
+        
+        if not has_valid_wire:
+            funding_status = "failed"
+            settlement_status = "pending"
+            status_description = "Invalid wire transfer details"
+        elif not has_settlement_agent:
+            funding_status = "pending"
+            settlement_status = "pending"
+            status_description = "Awaiting settlement agent confirmation"
+        else:
+            funding_status = "completed"
+            settlement_status = "completed"
+            status_description = "Funding successfully completed"
             
         return InvocationResponse(
             status="success",
             result={
-                "result": result,
-                "confidence": confidence
+                "funding_status": funding_status,
+                "transaction_details": {
+                    "transaction_id": transaction_id,
+                    "confirmation_number": confirmation_number,
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "status_description": status_description
+                },
+                "disbursement_confirmation": {
+                    "amount_disbursed": funding_amount,
+                    "recipient_confirmation": f"Sent to {disbursement_details['recipient_name']}",
+                    "wire_reference": wire_reference
+                },
+                "settlement_status": settlement_status
             },
             trace_id=request.trace_id
         )
         
-    except ValueError as e:
-        return InvocationResponse(
-            status="error",
-            error={
-                "error": {
-                    "code": "INVALID_INPUT",
-                    "message": str(e),
-                    "details": {
-                        "error_type": "ValidationError",
-                        "required_fields": ["text", "analysis_type"]
-                    }
-                }
-            },
-            trace_id=request.trace_id
-        )
     except Exception as e:
         logger.error(f"Error processing request: {str(e)}")
         return InvocationResponse(
@@ -334,5 +303,5 @@ async def root():
     return {
         "name": MOCK_AGENT_CONFIG["name"],
         "version": MOCK_AGENT_CONFIG["version"],
-        "description": "A mock AI agent that processes text and performs sentiment analysis"
+        "description": MOCK_AGENT_CONFIG["description"]
     }

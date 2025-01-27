@@ -2,10 +2,9 @@ from fastapi import FastAPI, HTTPException, Depends, Request, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
-from datetime import datetime, timedelta
+from datetime import datetime
 import logging
 import time
-from fastapi.security import APIKeyHeader
 from typing import Optional
 import asyncio
 from collections import defaultdict
@@ -67,83 +66,7 @@ async def rate_limiter(request: Request):
     rate_limit_storage[client_ip].append(now)
     return True
 
-app = FastAPI(title="Mock AI Agent", version="1.0.0")
-
-@app.exception_handler(RequestValidationError)
-async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    trace_id = "unknown"
-    if isinstance(request.state, dict) and "trace_id" in request.state:
-        trace_id = request.state["trace_id"]
-    
-    response = InvocationResponse(
-        status="error",
-        error=ErrorDetails(
-            code="VALIDATION_ERROR",
-            message="Request validation failed",
-            details={
-                "error_type": "ValidationError",
-                "errors": exc.errors()
-            }
-        ),
-        trace_id=trace_id
-    )
-    return JSONResponse(
-        status_code=400,
-        content=response.model_dump()
-    )
-
-@app.exception_handler(HTTPException)
-async def http_exception_handler(request: Request, exc: HTTPException):
-    trace_id = "unknown"
-    if isinstance(request.state, dict) and "trace_id" in request.state:
-        trace_id = request.state["trace_id"]
-    
-    if isinstance(exc.detail, dict) and "error" in exc.detail:
-        return JSONResponse(
-            status_code=exc.status_code,
-            content=exc.detail
-        )
-        
-    response = InvocationResponse(
-        status="error",
-        error=ErrorDetails(
-            code="HTTP_ERROR",
-            message=str(exc.detail),
-            details={
-                "error_type": "HTTPException",
-                "status_code": exc.status_code
-            }
-        ),
-        trace_id=trace_id
-    )
-    return JSONResponse(
-        status_code=exc.status_code,
-        content=response.model_dump()
-    )
-
-@app.exception_handler(Exception)
-async def general_exception_handler(request: Request, exc: Exception):
-    logger.error(f"Unhandled exception: {str(exc)}")
-    trace_id = "unknown"
-    if isinstance(request.state, dict) and "trace_id" in request.state:
-        trace_id = request.state["trace_id"]
-    
-    response = InvocationResponse(
-        status="error",
-        error=ErrorDetails(
-            code="INTERNAL_ERROR",
-            message="An internal server error occurred",
-            details={
-                "error_type": type(exc).__name__,
-                "error_message": str(exc)
-            }
-        ),
-        trace_id=trace_id
-    )
-    return JSONResponse(
-        status_code=500,
-        content=response.model_dump()
-    )
+app = FastAPI(title="Loan Document Processor Agent", version="1.0.0")
 
 # Configure CORS
 app.add_middleware(
@@ -156,28 +79,45 @@ app.add_middleware(
 
 # Mock agent configuration
 MOCK_AGENT_CONFIG = {
-    "name": "MockTextProcessor",
+    "name": "LoanDocProcessor",
     "version": "1.0.0",
-    "capabilities": ["text-processing", "sentiment-analysis"],
+    "description": "Processes and verifies loan documentation and initial applications",
+    "capabilities": ["document-verification", "application-review", "borrower-info-collection", "initial-processing"],
     "input_schema": {
         "type": "object",
         "properties": {
-            "text": {"type": "string"},
-            "analysis_type": {"type": "string", "enum": ["sentiment", "summary"]}
+            "document_type": {
+                "type": "string",
+                "enum": ["application", "income", "employment", "assets", "credit"]
+            },
+            "document_content": {"type": "string"},
+            "borrower_id": {"type": "string"},
+            "loan_type": {
+                "type": "string",
+                "enum": ["conventional", "fha", "va", "jumbo"]
+            }
         },
-        "required": ["text", "analysis_type"]
+        "required": ["document_type", "document_content", "borrower_id"]
     },
     "output_schema": {
         "type": "object",
         "properties": {
-            "result": {"type": "string"},
-            "confidence": {"type": "number"}
+            "verification_status": {
+                "type": "string",
+                "enum": ["verified", "incomplete", "rejected"]
+            },
+            "missing_items": {
+                "type": "array",
+                "items": {"type": "string"}
+            },
+            "notes": {"type": "string"},
+            "confidence_score": {"type": "number"}
         }
     }
 }
 
 @app.get("/health")
-async def health_check(rate_limit: bool = Depends(rate_limiter), request: Request = None) -> HealthCheck:
+async def health_check(rate_limit: bool = Depends(rate_limiter)) -> HealthCheck:
     """Health check endpoint"""
     return HealthCheck(
         status=AgentStatus.HEALTHY,
@@ -190,7 +130,7 @@ async def health_check(rate_limit: bool = Depends(rate_limiter), request: Reques
     )
 
 @app.get("/capabilities")
-async def get_capabilities(rate_limit: bool = Depends(rate_limiter), request: Request = None) -> AgentCapabilities:
+async def get_capabilities(rate_limit: bool = Depends(rate_limiter)) -> AgentCapabilities:
     """Get agent capabilities"""
     return AgentCapabilities(
         name=MOCK_AGENT_CONFIG["name"],
@@ -208,19 +148,13 @@ async def get_capabilities(rate_limit: bool = Depends(rate_limiter), request: Re
 async def invoke_agent(
     request: InvocationRequest,
     rate_limit: bool = Depends(rate_limiter),
-    req: Request = None,
-    marketplace_token: Optional[str] = Header(None, alias="X-Marketplace-Token", description="Optional marketplace token")
+    marketplace_token: Optional[str] = Header(None, alias="X-Marketplace-Token")
 ) -> InvocationResponse:
     """Invoke agent functionality"""
-    # Log invocation request
     logger.info(f"Processing invocation request with trace_id: {request.trace_id}")
     
-    # Log and validate token
-    logger.info(f"Received marketplace token: {marketplace_token}")
-    
-    # In development mode, accept any non-empty token
+    # Validate token
     if not marketplace_token or not marketplace_token.strip():
-        logger.error("Missing or empty marketplace token")
         raise HTTPException(
             status_code=401,
             detail={
@@ -235,8 +169,6 @@ async def invoke_agent(
                 "trace_id": request.trace_id
             }
         )
-    
-    logger.info("Development mode: Token validation passed")
     
     try:
         # Validate input against schema
@@ -258,59 +190,47 @@ async def invoke_agent(
                 },
                 trace_id=request.trace_id
             )
-            
-        # Process the request
-        text = request.input.get("text", "")
-        analysis_type = request.input.get("analysis_type", "")
         
-        if analysis_type not in ["sentiment", "summary"]:
-            return InvocationResponse(
-                status="error",
-                error={
-                    "error": {
-                        "code": "INVALID_ANALYSIS_TYPE",
-                        "message": "Invalid analysis type specified",
-                        "details": {
-                            "error_type": "ValidationError",
-                            "allowed_types": ["sentiment", "summary"],
-                            "received_type": analysis_type
-                        }
-                    }
-                },
-                trace_id=request.trace_id
-            )
-            
-        if analysis_type == "sentiment":
-            result = "positive" if any(word in text.lower() for word in ["good", "love", "great", "excellent"]) else "negative"
-            confidence = 0.85 if any(word in text.lower() for word in ["good", "love", "great", "excellent"]) else 0.65
-        else:  # summary
-            result = f"Summary of: {text[:50]}..."
+        # Process the request
+        document_type = request.input["document_type"]
+        document_content = request.input["document_content"]
+        borrower_id = request.input["borrower_id"]
+        loan_type = request.input.get("loan_type", "conventional")
+        
+        # Mock document processing logic
+        content_length = len(document_content)
+        has_required_info = all(
+            keyword in document_content.lower() 
+            for keyword in ["name", "address", "income"]
+        )
+        
+        if content_length < 50:  # Too short
+            status = "incomplete"
+            missing = ["detailed information", "supporting documentation"]
+            notes = "Document content is insufficient"
+            confidence = 0.3
+        elif not has_required_info:
+            status = "incomplete"
+            missing = ["basic borrower information"]
+            notes = "Missing required borrower information"
+            confidence = 0.5
+        else:
+            status = "verified"
+            missing = []
+            notes = "All required information present"
             confidence = 0.9
             
         return InvocationResponse(
             status="success",
             result={
-                "result": result,
-                "confidence": confidence
+                "verification_status": status,
+                "missing_items": missing,
+                "notes": notes,
+                "confidence_score": confidence
             },
             trace_id=request.trace_id
         )
         
-    except ValueError as e:
-        return InvocationResponse(
-            status="error",
-            error={
-                "error": {
-                    "code": "INVALID_INPUT",
-                    "message": str(e),
-                    "details": {
-                        "error_type": "ValidationError",
-                        "required_fields": ["text", "analysis_type"]
-                    }
-                }
-            },
-            trace_id=request.trace_id
-        )
     except Exception as e:
         logger.error(f"Error processing request: {str(e)}")
         return InvocationResponse(
@@ -334,5 +254,5 @@ async def root():
     return {
         "name": MOCK_AGENT_CONFIG["name"],
         "version": MOCK_AGENT_CONFIG["version"],
-        "description": "A mock AI agent that processes text and performs sentiment analysis"
+        "description": MOCK_AGENT_CONFIG["description"]
     }

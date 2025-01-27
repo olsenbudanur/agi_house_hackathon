@@ -2,10 +2,9 @@ from fastapi import FastAPI, HTTPException, Depends, Request, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
-from datetime import datetime, timedelta
+from datetime import datetime
 import logging
 import time
-from fastapi.security import APIKeyHeader
 from typing import Optional
 import asyncio
 from collections import defaultdict
@@ -67,83 +66,7 @@ async def rate_limiter(request: Request):
     rate_limit_storage[client_ip].append(now)
     return True
 
-app = FastAPI(title="Mock AI Agent", version="1.0.0")
-
-@app.exception_handler(RequestValidationError)
-async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    trace_id = "unknown"
-    if isinstance(request.state, dict) and "trace_id" in request.state:
-        trace_id = request.state["trace_id"]
-    
-    response = InvocationResponse(
-        status="error",
-        error=ErrorDetails(
-            code="VALIDATION_ERROR",
-            message="Request validation failed",
-            details={
-                "error_type": "ValidationError",
-                "errors": exc.errors()
-            }
-        ),
-        trace_id=trace_id
-    )
-    return JSONResponse(
-        status_code=400,
-        content=response.model_dump()
-    )
-
-@app.exception_handler(HTTPException)
-async def http_exception_handler(request: Request, exc: HTTPException):
-    trace_id = "unknown"
-    if isinstance(request.state, dict) and "trace_id" in request.state:
-        trace_id = request.state["trace_id"]
-    
-    if isinstance(exc.detail, dict) and "error" in exc.detail:
-        return JSONResponse(
-            status_code=exc.status_code,
-            content=exc.detail
-        )
-        
-    response = InvocationResponse(
-        status="error",
-        error=ErrorDetails(
-            code="HTTP_ERROR",
-            message=str(exc.detail),
-            details={
-                "error_type": "HTTPException",
-                "status_code": exc.status_code
-            }
-        ),
-        trace_id=trace_id
-    )
-    return JSONResponse(
-        status_code=exc.status_code,
-        content=response.model_dump()
-    )
-
-@app.exception_handler(Exception)
-async def general_exception_handler(request: Request, exc: Exception):
-    logger.error(f"Unhandled exception: {str(exc)}")
-    trace_id = "unknown"
-    if isinstance(request.state, dict) and "trace_id" in request.state:
-        trace_id = request.state["trace_id"]
-    
-    response = InvocationResponse(
-        status="error",
-        error=ErrorDetails(
-            code="INTERNAL_ERROR",
-            message="An internal server error occurred",
-            details={
-                "error_type": type(exc).__name__,
-                "error_message": str(exc)
-            }
-        ),
-        trace_id=trace_id
-    )
-    return JSONResponse(
-        status_code=500,
-        content=response.model_dump()
-    )
+app = FastAPI(title="Closing Coordinator Agent", version="1.0.0")
 
 # Configure CORS
 app.add_middleware(
@@ -156,28 +79,83 @@ app.add_middleware(
 
 # Mock agent configuration
 MOCK_AGENT_CONFIG = {
-    "name": "MockTextProcessor",
+    "name": "ClosingCoordinator",
     "version": "1.0.0",
-    "capabilities": ["text-processing", "sentiment-analysis"],
+    "description": "Coordinates closing process and document preparation",
+    "capabilities": ["closing-doc-prep", "closing-scheduling", "clear-to-close", "final-approval"],
     "input_schema": {
         "type": "object",
         "properties": {
-            "text": {"type": "string"},
-            "analysis_type": {"type": "string", "enum": ["sentiment", "summary"]}
+            "loan_id": {"type": "string"},
+            "closing_date": {"type": "string", "format": "date"},
+            "closing_location": {"type": "string"},
+            "participants": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "role": {
+                            "type": "string",
+                            "enum": ["borrower", "seller", "title_agent", "attorney", "loan_officer"]
+                        },
+                        "name": {"type": "string"},
+                        "email": {"type": "string"},
+                        "phone": {"type": "string"}
+                    },
+                    "required": ["role", "name", "email"]
+                }
+            },
+            "document_package": {
+                "type": "object",
+                "properties": {
+                    "closing_disclosure": {"type": "boolean"},
+                    "note": {"type": "boolean"},
+                    "deed": {"type": "boolean"},
+                    "title_insurance": {"type": "boolean"}
+                }
+            }
         },
-        "required": ["text", "analysis_type"]
+        "required": ["loan_id", "closing_date", "participants"]
     },
     "output_schema": {
         "type": "object",
         "properties": {
-            "result": {"type": "string"},
-            "confidence": {"type": "number"}
+            "status": {
+                "type": "string",
+                "enum": ["scheduled", "documents_pending", "clear_to_close", "completed"]
+            },
+            "scheduled_time": {"type": "string"},
+            "missing_documents": {
+                "type": "array",
+                "items": {"type": "string"}
+            },
+            "action_items": {
+                "type": "array",
+                "items": {"type": "string"}
+            },
+            "closing_confirmation": {
+                "type": "object",
+                "properties": {
+                    "confirmation_id": {"type": "string"},
+                    "location_details": {"type": "string"},
+                    "participant_confirmations": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "role": {"type": "string"},
+                                "confirmed": {"type": "boolean"}
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }
 
 @app.get("/health")
-async def health_check(rate_limit: bool = Depends(rate_limiter), request: Request = None) -> HealthCheck:
+async def health_check(rate_limit: bool = Depends(rate_limiter)) -> HealthCheck:
     """Health check endpoint"""
     return HealthCheck(
         status=AgentStatus.HEALTHY,
@@ -190,7 +168,7 @@ async def health_check(rate_limit: bool = Depends(rate_limiter), request: Reques
     )
 
 @app.get("/capabilities")
-async def get_capabilities(rate_limit: bool = Depends(rate_limiter), request: Request = None) -> AgentCapabilities:
+async def get_capabilities(rate_limit: bool = Depends(rate_limiter)) -> AgentCapabilities:
     """Get agent capabilities"""
     return AgentCapabilities(
         name=MOCK_AGENT_CONFIG["name"],
@@ -208,19 +186,13 @@ async def get_capabilities(rate_limit: bool = Depends(rate_limiter), request: Re
 async def invoke_agent(
     request: InvocationRequest,
     rate_limit: bool = Depends(rate_limiter),
-    req: Request = None,
-    marketplace_token: Optional[str] = Header(None, alias="X-Marketplace-Token", description="Optional marketplace token")
+    marketplace_token: Optional[str] = Header(None, alias="X-Marketplace-Token")
 ) -> InvocationResponse:
     """Invoke agent functionality"""
-    # Log invocation request
     logger.info(f"Processing invocation request with trace_id: {request.trace_id}")
     
-    # Log and validate token
-    logger.info(f"Received marketplace token: {marketplace_token}")
-    
-    # In development mode, accept any non-empty token
+    # Validate token
     if not marketplace_token or not marketplace_token.strip():
-        logger.error("Missing or empty marketplace token")
         raise HTTPException(
             status_code=401,
             detail={
@@ -235,8 +207,6 @@ async def invoke_agent(
                 "trace_id": request.trace_id
             }
         )
-    
-    logger.info("Development mode: Token validation passed")
     
     try:
         # Validate input against schema
@@ -258,59 +228,69 @@ async def invoke_agent(
                 },
                 trace_id=request.trace_id
             )
-            
-        # Process the request
-        text = request.input.get("text", "")
-        analysis_type = request.input.get("analysis_type", "")
         
-        if analysis_type not in ["sentiment", "summary"]:
-            return InvocationResponse(
-                status="error",
-                error={
-                    "error": {
-                        "code": "INVALID_ANALYSIS_TYPE",
-                        "message": "Invalid analysis type specified",
-                        "details": {
-                            "error_type": "ValidationError",
-                            "allowed_types": ["sentiment", "summary"],
-                            "received_type": analysis_type
-                        }
-                    }
-                },
-                trace_id=request.trace_id
-            )
+        # Process the request
+        loan_id = request.input["loan_id"]
+        closing_date = request.input["closing_date"]
+        participants = request.input["participants"]
+        doc_package = request.input.get("document_package", {})
+        
+        # Mock closing coordination logic
+        missing_docs = []
+        action_items = []
+        
+        # Check required documents
+        if not doc_package.get("closing_disclosure"):
+            missing_docs.append("Closing Disclosure")
+            action_items.append("Generate and review Closing Disclosure")
+        if not doc_package.get("note"):
+            missing_docs.append("Promissory Note")
+            action_items.append("Prepare Promissory Note")
+        if not doc_package.get("deed"):
+            missing_docs.append("Deed")
+            action_items.append("Prepare Deed")
+        if not doc_package.get("title_insurance"):
+            missing_docs.append("Title Insurance")
+            action_items.append("Order Title Insurance")
             
-        if analysis_type == "sentiment":
-            result = "positive" if any(word in text.lower() for word in ["good", "love", "great", "excellent"]) else "negative"
-            confidence = 0.85 if any(word in text.lower() for word in ["good", "love", "great", "excellent"]) else 0.65
-        else:  # summary
-            result = f"Summary of: {text[:50]}..."
-            confidence = 0.9
+        # Check participant confirmations
+        participant_confirmations = []
+        for participant in participants:
+            # Mock confirmation logic based on email domain
+            confirmed = "confirmed" in participant["email"].lower()
+            participant_confirmations.append({
+                "role": participant["role"],
+                "confirmed": confirmed
+            })
+            if not confirmed:
+                action_items.append(f"Follow up with {participant['role']} for confirmation")
+                
+        # Determine closing status
+        if missing_docs:
+            status = "documents_pending"
+        elif not all(conf["confirmed"] for conf in participant_confirmations):
+            status = "scheduled"
+        elif action_items:
+            status = "scheduled"
+        else:
+            status = "clear_to_close"
             
         return InvocationResponse(
             status="success",
             result={
-                "result": result,
-                "confidence": confidence
-            },
-            trace_id=request.trace_id
-        )
-        
-    except ValueError as e:
-        return InvocationResponse(
-            status="error",
-            error={
-                "error": {
-                    "code": "INVALID_INPUT",
-                    "message": str(e),
-                    "details": {
-                        "error_type": "ValidationError",
-                        "required_fields": ["text", "analysis_type"]
-                    }
+                "status": status,
+                "scheduled_time": f"{closing_date}T14:00:00Z",  # Default to 2 PM
+                "missing_documents": missing_docs,
+                "action_items": action_items,
+                "closing_confirmation": {
+                    "confirmation_id": f"CLOSE-{loan_id[:8]}",
+                    "location_details": request.input.get("closing_location", "TBD"),
+                    "participant_confirmations": participant_confirmations
                 }
             },
             trace_id=request.trace_id
         )
+        
     except Exception as e:
         logger.error(f"Error processing request: {str(e)}")
         return InvocationResponse(
@@ -334,5 +314,5 @@ async def root():
     return {
         "name": MOCK_AGENT_CONFIG["name"],
         "version": MOCK_AGENT_CONFIG["version"],
-        "description": "A mock AI agent that processes text and performs sentiment analysis"
+        "description": MOCK_AGENT_CONFIG["description"]
     }

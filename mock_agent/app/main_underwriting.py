@@ -2,10 +2,9 @@ from fastapi import FastAPI, HTTPException, Depends, Request, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
-from datetime import datetime, timedelta
+from datetime import datetime
 import logging
 import time
-from fastapi.security import APIKeyHeader
 from typing import Optional
 import asyncio
 from collections import defaultdict
@@ -67,83 +66,7 @@ async def rate_limiter(request: Request):
     rate_limit_storage[client_ip].append(now)
     return True
 
-app = FastAPI(title="Mock AI Agent", version="1.0.0")
-
-@app.exception_handler(RequestValidationError)
-async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    trace_id = "unknown"
-    if isinstance(request.state, dict) and "trace_id" in request.state:
-        trace_id = request.state["trace_id"]
-    
-    response = InvocationResponse(
-        status="error",
-        error=ErrorDetails(
-            code="VALIDATION_ERROR",
-            message="Request validation failed",
-            details={
-                "error_type": "ValidationError",
-                "errors": exc.errors()
-            }
-        ),
-        trace_id=trace_id
-    )
-    return JSONResponse(
-        status_code=400,
-        content=response.model_dump()
-    )
-
-@app.exception_handler(HTTPException)
-async def http_exception_handler(request: Request, exc: HTTPException):
-    trace_id = "unknown"
-    if isinstance(request.state, dict) and "trace_id" in request.state:
-        trace_id = request.state["trace_id"]
-    
-    if isinstance(exc.detail, dict) and "error" in exc.detail:
-        return JSONResponse(
-            status_code=exc.status_code,
-            content=exc.detail
-        )
-        
-    response = InvocationResponse(
-        status="error",
-        error=ErrorDetails(
-            code="HTTP_ERROR",
-            message=str(exc.detail),
-            details={
-                "error_type": "HTTPException",
-                "status_code": exc.status_code
-            }
-        ),
-        trace_id=trace_id
-    )
-    return JSONResponse(
-        status_code=exc.status_code,
-        content=response.model_dump()
-    )
-
-@app.exception_handler(Exception)
-async def general_exception_handler(request: Request, exc: Exception):
-    logger.error(f"Unhandled exception: {str(exc)}")
-    trace_id = "unknown"
-    if isinstance(request.state, dict) and "trace_id" in request.state:
-        trace_id = request.state["trace_id"]
-    
-    response = InvocationResponse(
-        status="error",
-        error=ErrorDetails(
-            code="INTERNAL_ERROR",
-            message="An internal server error occurred",
-            details={
-                "error_type": type(exc).__name__,
-                "error_message": str(exc)
-            }
-        ),
-        trace_id=trace_id
-    )
-    return JSONResponse(
-        status_code=500,
-        content=response.model_dump()
-    )
+app = FastAPI(title="Underwriting Analyzer Agent", version="1.0.0")
 
 # Configure CORS
 app.add_middleware(
@@ -156,28 +79,65 @@ app.add_middleware(
 
 # Mock agent configuration
 MOCK_AGENT_CONFIG = {
-    "name": "MockTextProcessor",
+    "name": "UnderwritingAnalyzer",
     "version": "1.0.0",
-    "capabilities": ["text-processing", "sentiment-analysis"],
+    "description": "Analyzes loan applications and performs underwriting assessments",
+    "capabilities": ["credit-verification", "loan-quality-check", "risk-assessment", "conditional-approval"],
     "input_schema": {
         "type": "object",
         "properties": {
-            "text": {"type": "string"},
-            "analysis_type": {"type": "string", "enum": ["sentiment", "summary"]}
+            "borrower_id": {"type": "string"},
+            "loan_amount": {"type": "number"},
+            "loan_type": {
+                "type": "string",
+                "enum": ["conventional", "fha", "va", "jumbo"]
+            },
+            "credit_score": {"type": "integer"},
+            "debt_to_income": {"type": "number"},
+            "employment_history": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "employer": {"type": "string"},
+                        "years": {"type": "number"}
+                    }
+                }
+            },
+            "assets": {
+                "type": "object",
+                "properties": {
+                    "liquid": {"type": "number"},
+                    "retirement": {"type": "number"},
+                    "other": {"type": "number"}
+                }
+            }
         },
-        "required": ["text", "analysis_type"]
+        "required": ["borrower_id", "loan_amount", "loan_type", "credit_score", "debt_to_income"]
     },
     "output_schema": {
         "type": "object",
         "properties": {
-            "result": {"type": "string"},
-            "confidence": {"type": "number"}
+            "decision": {
+                "type": "string",
+                "enum": ["approved", "conditionally_approved", "denied"]
+            },
+            "conditions": {
+                "type": "array",
+                "items": {"type": "string"}
+            },
+            "risk_factors": {
+                "type": "array",
+                "items": {"type": "string"}
+            },
+            "max_loan_amount": {"type": "number"},
+            "notes": {"type": "string"}
         }
     }
 }
 
 @app.get("/health")
-async def health_check(rate_limit: bool = Depends(rate_limiter), request: Request = None) -> HealthCheck:
+async def health_check(rate_limit: bool = Depends(rate_limiter)) -> HealthCheck:
     """Health check endpoint"""
     return HealthCheck(
         status=AgentStatus.HEALTHY,
@@ -190,7 +150,7 @@ async def health_check(rate_limit: bool = Depends(rate_limiter), request: Reques
     )
 
 @app.get("/capabilities")
-async def get_capabilities(rate_limit: bool = Depends(rate_limiter), request: Request = None) -> AgentCapabilities:
+async def get_capabilities(rate_limit: bool = Depends(rate_limiter)) -> AgentCapabilities:
     """Get agent capabilities"""
     return AgentCapabilities(
         name=MOCK_AGENT_CONFIG["name"],
@@ -208,19 +168,13 @@ async def get_capabilities(rate_limit: bool = Depends(rate_limiter), request: Re
 async def invoke_agent(
     request: InvocationRequest,
     rate_limit: bool = Depends(rate_limiter),
-    req: Request = None,
-    marketplace_token: Optional[str] = Header(None, alias="X-Marketplace-Token", description="Optional marketplace token")
+    marketplace_token: Optional[str] = Header(None, alias="X-Marketplace-Token")
 ) -> InvocationResponse:
     """Invoke agent functionality"""
-    # Log invocation request
     logger.info(f"Processing invocation request with trace_id: {request.trace_id}")
     
-    # Log and validate token
-    logger.info(f"Received marketplace token: {marketplace_token}")
-    
-    # In development mode, accept any non-empty token
+    # Validate token
     if not marketplace_token or not marketplace_token.strip():
-        logger.error("Missing or empty marketplace token")
         raise HTTPException(
             status_code=401,
             detail={
@@ -235,8 +189,6 @@ async def invoke_agent(
                 "trace_id": request.trace_id
             }
         )
-    
-    logger.info("Development mode: Token validation passed")
     
     try:
         # Validate input against schema
@@ -258,59 +210,62 @@ async def invoke_agent(
                 },
                 trace_id=request.trace_id
             )
-            
-        # Process the request
-        text = request.input.get("text", "")
-        analysis_type = request.input.get("analysis_type", "")
         
-        if analysis_type not in ["sentiment", "summary"]:
-            return InvocationResponse(
-                status="error",
-                error={
-                    "error": {
-                        "code": "INVALID_ANALYSIS_TYPE",
-                        "message": "Invalid analysis type specified",
-                        "details": {
-                            "error_type": "ValidationError",
-                            "allowed_types": ["sentiment", "summary"],
-                            "received_type": analysis_type
-                        }
-                    }
-                },
-                trace_id=request.trace_id
-            )
+        # Process the request
+        credit_score = request.input["credit_score"]
+        debt_to_income = request.input["debt_to_income"]
+        loan_amount = request.input["loan_amount"]
+        loan_type = request.input["loan_type"]
+        
+        # Mock underwriting logic
+        conditions = []
+        risk_factors = []
+        
+        # Credit score analysis
+        if credit_score < 620:
+            decision = "denied"
+            risk_factors.append("Credit score below minimum requirement")
+        elif credit_score < 680:
+            conditions.append("Additional credit history documentation required")
+            risk_factors.append("Marginal credit score")
+        
+        # DTI analysis
+        if debt_to_income > 43:
+            decision = "denied"
+            risk_factors.append("DTI ratio exceeds maximum allowance")
+        elif debt_to_income > 36:
+            conditions.append("Compensating factors required for DTI")
+            risk_factors.append("High DTI ratio")
             
-        if analysis_type == "sentiment":
-            result = "positive" if any(word in text.lower() for word in ["good", "love", "great", "excellent"]) else "negative"
-            confidence = 0.85 if any(word in text.lower() for word in ["good", "love", "great", "excellent"]) else 0.65
-        else:  # summary
-            result = f"Summary of: {text[:50]}..."
-            confidence = 0.9
+        # Loan amount analysis
+        max_loan_amount = credit_score * 1000  # Simplified calculation
+        if loan_amount > max_loan_amount:
+            conditions.append(f"Loan amount exceeds calculated maximum of ${max_loan_amount}")
+            risk_factors.append("High loan amount relative to qualifications")
+            
+        # Final decision logic
+        if not risk_factors:
+            decision = "approved"
+            notes = "Application meets all standard requirements"
+        elif len(risk_factors) == 1 and conditions:
+            decision = "conditionally_approved"
+            notes = "Application can proceed with conditions"
+        elif not "denied" in locals():
+            decision = "conditionally_approved"
+            notes = "Multiple risk factors identified - strong compensating factors required"
             
         return InvocationResponse(
             status="success",
             result={
-                "result": result,
-                "confidence": confidence
+                "decision": decision,
+                "conditions": conditions,
+                "risk_factors": risk_factors,
+                "max_loan_amount": max_loan_amount,
+                "notes": notes
             },
             trace_id=request.trace_id
         )
         
-    except ValueError as e:
-        return InvocationResponse(
-            status="error",
-            error={
-                "error": {
-                    "code": "INVALID_INPUT",
-                    "message": str(e),
-                    "details": {
-                        "error_type": "ValidationError",
-                        "required_fields": ["text", "analysis_type"]
-                    }
-                }
-            },
-            trace_id=request.trace_id
-        )
     except Exception as e:
         logger.error(f"Error processing request: {str(e)}")
         return InvocationResponse(
@@ -334,5 +289,5 @@ async def root():
     return {
         "name": MOCK_AGENT_CONFIG["name"],
         "version": MOCK_AGENT_CONFIG["version"],
-        "description": "A mock AI agent that processes text and performs sentiment analysis"
+        "description": MOCK_AGENT_CONFIG["description"]
     }

@@ -2,10 +2,9 @@ from fastapi import FastAPI, HTTPException, Depends, Request, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
-from datetime import datetime, timedelta
+from datetime import datetime
 import logging
 import time
-from fastapi.security import APIKeyHeader
 from typing import Optional
 import asyncio
 from collections import defaultdict
@@ -67,83 +66,7 @@ async def rate_limiter(request: Request):
     rate_limit_storage[client_ip].append(now)
     return True
 
-app = FastAPI(title="Mock AI Agent", version="1.0.0")
-
-@app.exception_handler(RequestValidationError)
-async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    trace_id = "unknown"
-    if isinstance(request.state, dict) and "trace_id" in request.state:
-        trace_id = request.state["trace_id"]
-    
-    response = InvocationResponse(
-        status="error",
-        error=ErrorDetails(
-            code="VALIDATION_ERROR",
-            message="Request validation failed",
-            details={
-                "error_type": "ValidationError",
-                "errors": exc.errors()
-            }
-        ),
-        trace_id=trace_id
-    )
-    return JSONResponse(
-        status_code=400,
-        content=response.model_dump()
-    )
-
-@app.exception_handler(HTTPException)
-async def http_exception_handler(request: Request, exc: HTTPException):
-    trace_id = "unknown"
-    if isinstance(request.state, dict) and "trace_id" in request.state:
-        trace_id = request.state["trace_id"]
-    
-    if isinstance(exc.detail, dict) and "error" in exc.detail:
-        return JSONResponse(
-            status_code=exc.status_code,
-            content=exc.detail
-        )
-        
-    response = InvocationResponse(
-        status="error",
-        error=ErrorDetails(
-            code="HTTP_ERROR",
-            message=str(exc.detail),
-            details={
-                "error_type": "HTTPException",
-                "status_code": exc.status_code
-            }
-        ),
-        trace_id=trace_id
-    )
-    return JSONResponse(
-        status_code=exc.status_code,
-        content=response.model_dump()
-    )
-
-@app.exception_handler(Exception)
-async def general_exception_handler(request: Request, exc: Exception):
-    logger.error(f"Unhandled exception: {str(exc)}")
-    trace_id = "unknown"
-    if isinstance(request.state, dict) and "trace_id" in request.state:
-        trace_id = request.state["trace_id"]
-    
-    response = InvocationResponse(
-        status="error",
-        error=ErrorDetails(
-            code="INTERNAL_ERROR",
-            message="An internal server error occurred",
-            details={
-                "error_type": type(exc).__name__,
-                "error_message": str(exc)
-            }
-        ),
-        trace_id=trace_id
-    )
-    return JSONResponse(
-        status_code=500,
-        content=response.model_dump()
-    )
+app = FastAPI(title="Quality Controller Agent", version="1.0.0")
 
 # Configure CORS
 app.add_middleware(
@@ -156,28 +79,79 @@ app.add_middleware(
 
 # Mock agent configuration
 MOCK_AGENT_CONFIG = {
-    "name": "MockTextProcessor",
+    "name": "QualityController",
     "version": "1.0.0",
-    "capabilities": ["text-processing", "sentiment-analysis"],
+    "description": "Performs quality control reviews and compliance checks",
+    "capabilities": ["post-closing-review", "compliance-check", "qc-audit", "investor-requirements"],
     "input_schema": {
         "type": "object",
         "properties": {
-            "text": {"type": "string"},
-            "analysis_type": {"type": "string", "enum": ["sentiment", "summary"]}
+            "loan_id": {"type": "string"},
+            "review_type": {
+                "type": "string",
+                "enum": ["pre_funding", "post_closing", "investor_audit"]
+            },
+            "loan_data": {
+                "type": "object",
+                "properties": {
+                    "loan_amount": {"type": "number"},
+                    "loan_type": {"type": "string"},
+                    "interest_rate": {"type": "number"},
+                    "term": {"type": "integer"},
+                    "property_value": {"type": "number"}
+                }
+            },
+            "document_checklist": {
+                "type": "object",
+                "properties": {
+                    "application": {"type": "boolean"},
+                    "income_verification": {"type": "boolean"},
+                    "asset_verification": {"type": "boolean"},
+                    "appraisal": {"type": "boolean"},
+                    "title_report": {"type": "boolean"},
+                    "closing_disclosure": {"type": "boolean"}
+                }
+            }
         },
-        "required": ["text", "analysis_type"]
+        "required": ["loan_id", "review_type", "loan_data"]
     },
     "output_schema": {
         "type": "object",
         "properties": {
-            "result": {"type": "string"},
-            "confidence": {"type": "number"}
+            "review_status": {
+                "type": "string",
+                "enum": ["passed", "failed", "pending_corrections"]
+            },
+            "findings": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "severity": {
+                            "type": "string",
+                            "enum": ["critical", "major", "minor"]
+                        },
+                        "category": {"type": "string"},
+                        "description": {"type": "string"},
+                        "remediation": {"type": "string"}
+                    }
+                }
+            },
+            "compliance_status": {
+                "type": "object",
+                "properties": {
+                    "regulatory_compliance": {"type": "boolean"},
+                    "investor_guidelines": {"type": "boolean"},
+                    "internal_policies": {"type": "boolean"}
+                }
+            },
+            "review_summary": {"type": "string"}
         }
     }
 }
 
 @app.get("/health")
-async def health_check(rate_limit: bool = Depends(rate_limiter), request: Request = None) -> HealthCheck:
+async def health_check(rate_limit: bool = Depends(rate_limiter)) -> HealthCheck:
     """Health check endpoint"""
     return HealthCheck(
         status=AgentStatus.HEALTHY,
@@ -190,7 +164,7 @@ async def health_check(rate_limit: bool = Depends(rate_limiter), request: Reques
     )
 
 @app.get("/capabilities")
-async def get_capabilities(rate_limit: bool = Depends(rate_limiter), request: Request = None) -> AgentCapabilities:
+async def get_capabilities(rate_limit: bool = Depends(rate_limiter)) -> AgentCapabilities:
     """Get agent capabilities"""
     return AgentCapabilities(
         name=MOCK_AGENT_CONFIG["name"],
@@ -208,19 +182,13 @@ async def get_capabilities(rate_limit: bool = Depends(rate_limiter), request: Re
 async def invoke_agent(
     request: InvocationRequest,
     rate_limit: bool = Depends(rate_limiter),
-    req: Request = None,
-    marketplace_token: Optional[str] = Header(None, alias="X-Marketplace-Token", description="Optional marketplace token")
+    marketplace_token: Optional[str] = Header(None, alias="X-Marketplace-Token")
 ) -> InvocationResponse:
     """Invoke agent functionality"""
-    # Log invocation request
     logger.info(f"Processing invocation request with trace_id: {request.trace_id}")
     
-    # Log and validate token
-    logger.info(f"Received marketplace token: {marketplace_token}")
-    
-    # In development mode, accept any non-empty token
+    # Validate token
     if not marketplace_token or not marketplace_token.strip():
-        logger.error("Missing or empty marketplace token")
         raise HTTPException(
             status_code=401,
             detail={
@@ -235,8 +203,6 @@ async def invoke_agent(
                 "trace_id": request.trace_id
             }
         )
-    
-    logger.info("Development mode: Token validation passed")
     
     try:
         # Validate input against schema
@@ -258,59 +224,69 @@ async def invoke_agent(
                 },
                 trace_id=request.trace_id
             )
-            
-        # Process the request
-        text = request.input.get("text", "")
-        analysis_type = request.input.get("analysis_type", "")
         
-        if analysis_type not in ["sentiment", "summary"]:
-            return InvocationResponse(
-                status="error",
-                error={
-                    "error": {
-                        "code": "INVALID_ANALYSIS_TYPE",
-                        "message": "Invalid analysis type specified",
-                        "details": {
-                            "error_type": "ValidationError",
-                            "allowed_types": ["sentiment", "summary"],
-                            "received_type": analysis_type
-                        }
-                    }
-                },
-                trace_id=request.trace_id
-            )
+        # Process the request
+        loan_id = request.input["loan_id"]
+        review_type = request.input["review_type"]
+        loan_data = request.input["loan_data"]
+        doc_checklist = request.input.get("document_checklist", {})
+        
+        # Mock QC review logic
+        findings = []
+        
+        # Document completeness check
+        for doc_type, present in doc_checklist.items():
+            if not present:
+                findings.append({
+                    "severity": "major",
+                    "category": "Documentation",
+                    "description": f"Missing {doc_type.replace('_', ' ')}",
+                    "remediation": f"Obtain and upload {doc_type.replace('_', ' ')}"
+                })
+                
+        # Loan data validation
+        if loan_data["loan_amount"] > loan_data["property_value"]:
+            findings.append({
+                "severity": "critical",
+                "category": "Loan-to-Value",
+                "description": "Loan amount exceeds property value",
+                "remediation": "Review and correct loan amount or property value"
+            })
             
-        if analysis_type == "sentiment":
-            result = "positive" if any(word in text.lower() for word in ["good", "love", "great", "excellent"]) else "negative"
-            confidence = 0.85 if any(word in text.lower() for word in ["good", "love", "great", "excellent"]) else 0.65
-        else:  # summary
-            result = f"Summary of: {text[:50]}..."
-            confidence = 0.9
+        if loan_data["interest_rate"] < 2.0 or loan_data["interest_rate"] > 18.0:
+            findings.append({
+                "severity": "major",
+                "category": "Interest Rate",
+                "description": "Interest rate outside normal range",
+                "remediation": "Verify interest rate and provide justification"
+            })
+            
+        # Determine review status
+        if any(finding["severity"] == "critical" for finding in findings):
+            review_status = "failed"
+        elif any(finding["severity"] == "major" for finding in findings):
+            review_status = "pending_corrections"
+        else:
+            review_status = "passed"
+            
+        # Mock compliance check
+        compliance_status = {
+            "regulatory_compliance": len(findings) == 0,
+            "investor_guidelines": len(findings) <= 1,
+            "internal_policies": review_status != "failed"
+        }
             
         return InvocationResponse(
             status="success",
             result={
-                "result": result,
-                "confidence": confidence
+                "review_status": review_status,
+                "findings": findings,
+                "compliance_status": compliance_status,
+                "review_summary": f"QC review completed for loan {loan_id}. Status: {review_status}"
             },
             trace_id=request.trace_id
         )
         
-    except ValueError as e:
-        return InvocationResponse(
-            status="error",
-            error={
-                "error": {
-                    "code": "INVALID_INPUT",
-                    "message": str(e),
-                    "details": {
-                        "error_type": "ValidationError",
-                        "required_fields": ["text", "analysis_type"]
-                    }
-                }
-            },
-            trace_id=request.trace_id
-        )
     except Exception as e:
         logger.error(f"Error processing request: {str(e)}")
         return InvocationResponse(
@@ -334,5 +310,5 @@ async def root():
     return {
         "name": MOCK_AGENT_CONFIG["name"],
         "version": MOCK_AGENT_CONFIG["version"],
-        "description": "A mock AI agent that processes text and performs sentiment analysis"
+        "description": MOCK_AGENT_CONFIG["description"]
     }

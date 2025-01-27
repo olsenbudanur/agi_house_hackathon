@@ -1,35 +1,57 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from .routes import agents
 import logging
+import uuid
 
 # Configure logging
 logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="AI Agent Marketplace",
     version="1.0.0",
-    root_path="/api/v1",  # Add root path prefix for proxy
-    openapi_url="/api/v1/openapi.json",
-    docs_url="/api/v1/docs",
-    redoc_url="/api/v1/redoc"
+    openapi_url="/openapi.json",
+    docs_url="/docs",
+    redoc_url="/redoc"
 )
 
-# Configure CORS for production
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    """Convert HTTPException to our standard error response format"""
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=exc.detail if isinstance(exc.detail, dict) else {
+            "status": "error",
+            "error": {
+                "code": "REQUEST_ERROR",
+                "message": str(exc.detail),
+                "details": {
+                    "error_type": "HTTPException",
+                    "status_code": exc.status_code
+                }
+            },
+            "trace_id": str(uuid.uuid4())
+        }
+    )
+
+# Configure CORS for local development
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://ai-agent-marketplace-9z6l1gh1.devinapps.com"],
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,  # Changed to False since we're using token auth
     allow_methods=["*"],
     allow_headers=["*"],
     expose_headers=["*"]
 )
 
 # Include routers
-app.include_router(agents.router)
+app.include_router(agents.router, prefix="/api/v1/agents", tags=["agents"])
+logger.info(f"Mounted agents router at /api/v1/agents with routes: {[route.path for route in agents.router.routes]}")
 
 @app.get("/healthz")
 async def healthz():
