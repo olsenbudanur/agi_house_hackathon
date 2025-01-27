@@ -56,23 +56,9 @@ export function AgentList() {
     try {
       setIsSearching(true)
       setError(null)
-      let results;
-      if (semanticMode) {
-        console.log('Performing semantic search...');
-        results = await semanticSearch(query);
-        console.log('Semantic search results:', results);
-      } else {
-        results = agents.filter(agent => {
-          const searchTermLower = query.toLowerCase()
-          return (
-            (agent.name?.toLowerCase() || '').includes(searchTermLower) ||
-            (agent.description?.toLowerCase() || '').includes(searchTermLower) ||
-            (agent.capabilities || []).some(cap => 
-              (cap?.toLowerCase() || '').includes(searchTermLower)
-            )
-          )
-        });
-      }
+      console.log('Performing semantic search...');
+      const results = await semanticSearch(query);
+      console.log('Semantic search results:', results);
       setAgents(results)
     } catch (error) {
       const errorMessage = error instanceof Error 
@@ -134,20 +120,6 @@ export function AgentList() {
             }}
             className="pl-9"
           />
-          <Button
-            variant="ghost"
-            size="sm"
-            className="absolute right-2 top-2"
-            onClick={() => {
-              setSemanticMode(!semanticMode)
-              // Trigger search with current term when switching modes
-              if (searchTerm) {
-                performSearch(searchTerm)
-              }
-            }}
-          >
-            {semanticMode ? "Basic Search" : "Semantic Search"}
-          </Button>
         </div>
         <Select value={statusFilter} onValueChange={setStatusFilter}>
           <SelectTrigger className="w-48">
