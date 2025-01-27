@@ -1,17 +1,88 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, Request, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
+from json.decoder import JSONDecodeError
+from typing import Dict, Any, Optional
 import os
 import logging
 import datetime
-from typing import List
+import time
+from collections import defaultdict
+from typing import List, Optional
 from openai import OpenAI
 from dotenv import load_dotenv, find_dotenv
 from PIL import Image
 from io import BytesIO
 from app.validation import validate_matrix_data, format_validation_response
-from app.matrix_types import MatrixResponse, ErrorResponse, ProcessingMethod, MatrixData
+from app.matrix_types import (
+    MatrixResponse, ErrorResponse, ProcessingMethod, MatrixData,
+    AgentStatus, HealthCheck, AgentCapabilities, InvocationRequest,
+    InvocationResponse, ErrorDetails
+)
 from app.ocr_processor import process_matrix_with_ocr
+import time
+
+# Load environment variables
+load_dotenv(find_dotenv())
+
+# Initialize OpenAI client
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Global start time for uptime calculation
+START_TIME = time.time()
+
+# Global success/failure counters for metrics
+request_counts = {
+    "success": 0,
+    "total": 0,
+    "response_times": []
+}
+
+# Rate limiting configuration
+RATE_LIMIT_WINDOW = 60  # seconds
+MAX_REQUESTS_PER_WINDOW = 10
+rate_limit_storage = defaultdict(list)
+
+async def rate_limiter(request: Request):
+    """Rate limiting dependency"""
+    now = time.time()
+    client_ip = "default"  # In production, get this from request
+    trace_id = request.headers.get("X-Trace-ID", "unknown")
+    
+    # Clean old requests
+    rate_limit_storage[client_ip] = [
+        req_time for req_time in rate_limit_storage[client_ip]
+        if now - req_time < RATE_LIMIT_WINDOW
+    ]
+    
+    # Check rate limit
+    if len(rate_limit_storage[client_ip]) >= MAX_REQUESTS_PER_WINDOW:
+        return JSONResponse(
+            status_code=429,
+            content={
+                "status": "error",
+                "error": {
+                    "code": "RATE_LIMIT_EXCEEDED",
+                    "message": "Rate limit exceeded. Please try again later.",
+                    "details": {
+                        "error_type": "RateLimitError",
+                        "window_seconds": RATE_LIMIT_WINDOW,
+                        "max_requests": MAX_REQUESTS_PER_WINDOW,
+                        "retry_after": RATE_LIMIT_WINDOW
+                    }
+                },
+                "trace_id": trace_id
+            }
+        )
+    
+    # Add current request
+    rate_limit_storage[client_ip].append(now)
+    return True
 
 # Configure logging
 logging.basicConfig(
@@ -42,8 +113,41 @@ app.add_middleware(
     allow_headers=["*"],  # Allows all headers
 )
 
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    trace_id = request.headers.get("X-Trace-ID", "unknown")
+    # Clean up validation errors to remove body-level errors
+    errors = [err for err in exc.errors() if not (
+        isinstance(err.get('loc'), tuple) and 
+        len(err['loc']) > 0 and 
+        err['loc'][0] == 'body'
+    )]
+    
+    if not errors:
+        # If all errors were body-level, this is likely a JSON parsing error
+        errors = [{
+            "type": "json_parse_error",
+            "msg": "Invalid JSON format in request body"
+        }]
+    
+    return JSONResponse(
+        status_code=400,
+        content={
+            "status": "error",
+            "error": {
+                "code": "VALIDATION_ERROR",
+                "message": "Request validation failed",
+                "details": {
+                    "error_type": "ValidationError",
+                    "errors": errors
+                }
+            },
+            "trace_id": trace_id
+        }
+    )
+
 @app.get("/")
-async def root():
+async def root(rate_limit: bool = Depends(rate_limiter)):
     return {
         "message": "Insurance Matrix Processor API",
         "version": "1.0.0",
@@ -68,8 +172,312 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Agent configuration
+AGENT_CONFIG = {
+    "name": "MatrixProcessorAgent",
+    "version": "1.0.0",
+    "capabilities": [
+        "matrix-parsing",
+        "guideline-extraction",
+        "pdf-to-image-conversion",
+        "ocr-processing"
+    ],
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "file_url": {
+                "type": "string",
+                "format": "uri",
+                "description": "URL of the matrix image or PDF file to process"
+            }
+        },
+        "required": ["file_url"]
+    },
+    "output_schema": {
+        "type": "object",
+        "properties": {
+            "data": {
+                "type": "object",
+                "properties": {
+                    "ltv_requirements": {"type": "object"},
+                    "credit_requirements": {"type": "object"},
+                    "income_requirements": {"type": "object"},
+                    "property_requirements": {"type": "object"},
+                    "additional_requirements": {"type": "object"}
+                }
+            },
+            "validation": {
+                "type": "object",
+                "properties": {
+                    "errors": {"type": "array"},
+                    "warnings": {"type": "array"}
+                }
+            },
+            "processing_info": {
+                "type": "object",
+                "properties": {
+                    "confidence_scores": {"type": "object"}
+                }
+            }
+        }
+    }
+}
+
+@app.get("/health")
+async def health_check(rate_limit: bool = Depends(rate_limiter)) -> HealthCheck:
+    """Health check endpoint for the marketplace."""
+    # Calculate metrics
+    uptime = int(time.time() - START_TIME)
+    success_rate = request_counts["success"] / request_counts["total"] if request_counts["total"] > 0 else 1.0
+    avg_response_time = (
+        sum(request_counts["response_times"]) / len(request_counts["response_times"])
+        if request_counts["response_times"]
+        else 0.0
+    )
+
+    try:
+        # Test OpenAI API
+        if not client.api_key:
+            return HealthCheck(
+                status=AgentStatus.UNHEALTHY,
+                last_updated=datetime.datetime.utcnow(),
+                metrics={
+                    "uptime": uptime,
+                    "success_rate": success_rate,
+                    "average_response_time": avg_response_time
+                }
+            )
+        
+        # Test OpenAI connectivity
+        client.models.list()
+        
+        # Test Tesseract
+        import subprocess
+        tesseract_cmd = None
+        for path in ['/usr/local/bin/tesseract', '/usr/bin/tesseract', 'tesseract']:
+            if path and (os.path.exists(path) or subprocess.run(['which', path], capture_output=True).returncode == 0):
+                tesseract_cmd = path
+                break
+        
+        if not tesseract_cmd:
+            return HealthCheck(
+                status=AgentStatus.DEGRADED,
+                last_updated=datetime.datetime.utcnow(),
+                metrics={
+                    "uptime": uptime,
+                    "success_rate": success_rate,
+                    "average_response_time": avg_response_time
+                }
+            )
+        
+        # All checks passed
+        return HealthCheck(
+            status=AgentStatus.HEALTHY,
+            last_updated=datetime.datetime.utcnow(),
+            metrics={
+                "uptime": uptime,
+                "success_rate": success_rate,
+                "average_response_time": avg_response_time
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"Health check failed: {str(e)}")
+        return HealthCheck(
+            status=AgentStatus.UNHEALTHY,
+            last_updated=datetime.datetime.utcnow(),
+            metrics={
+                "uptime": uptime,
+                "success_rate": success_rate,
+                "average_response_time": avg_response_time
+            }
+        )
+
+@app.get("/capabilities")
+async def get_capabilities(rate_limit: bool = Depends(rate_limiter)) -> AgentCapabilities:
+    """Get agent capabilities endpoint for the marketplace."""
+    # Define agent configuration if not already defined
+    agent_config = {
+        "name": "MatrixProcessorAgent",
+        "version": "1.0.0",
+        "capabilities": [
+            "matrix-parsing",
+            "pdf-to-image-conversion"
+        ],
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "file_url": {"type": "string", "format": "uri"}
+            },
+            "required": ["file_url"]
+        },
+        "output_schema": {
+            "type": "object",
+            "properties": {
+                "data": {"type": "object"},
+                "validation": {"type": "object"}
+            }
+        }
+    }
+    
+    return AgentCapabilities(
+        name=agent_config["name"],
+        version=agent_config["version"],
+        capabilities=agent_config["capabilities"],
+        input_schema=agent_config["input_schema"],
+        output_schema=agent_config["output_schema"],
+        rate_limits={
+            "requests_per_second": 10,  # Fixed integer value as per spec
+            "burst_limit": 20  # Fixed integer value as per spec
+        }
+    )
+
+@app.post("/invoke")
+async def invoke_agent(
+    request: Request,
+    rate_limit: bool = Depends(rate_limiter),
+    marketplace_token: Optional[str] = Header(None, alias="X-Marketplace-Token"),
+    trace_id: str = Header(..., alias="X-Trace-ID")
+) -> InvocationResponse:
+    """Invoke agent functionality endpoint for the marketplace."""
+    logger.info(f"Processing invocation request with trace_id: {trace_id}")
+    
+    try:
+        # Parse and validate request body
+        request_body = await request.json()
+        if not isinstance(request_body, dict):
+            return InvocationResponse(
+                status="error",
+                error=ErrorDetails(
+                    code="INVALID_JSON",
+                    message="Request body must be a JSON object",
+                    details={"error_type": "JSONDecodeError"}
+                ),
+                trace_id=trace_id
+            )
+            
+        request_model = InvocationRequest(**request_body)
+    except JSONDecodeError:
+        return InvocationResponse(
+            status="error",
+            error=ErrorDetails(
+                code="INVALID_JSON",
+                message="Invalid JSON in request body",
+                details={"error_type": "JSONDecodeError"}
+            ),
+            trace_id=trace_id
+        )
+    except ValidationError as e:
+        return InvocationResponse(
+            status="error",
+            error=ErrorDetails(
+                code="VALIDATION_ERROR",
+                message="Invalid request format",
+                details={"error_type": "ValidationError", "errors": e.errors()}
+            ),
+            trace_id=trace_id
+        )
+    
+    # Validate marketplace token
+    if not marketplace_token or not marketplace_token.strip():
+        return InvocationResponse(
+            status="error",
+            error=ErrorDetails(
+                code="INVALID_TOKEN",
+                message="Missing or invalid marketplace token",
+                details={"error_type": "AuthenticationError"}
+            ),
+            trace_id=trace_id
+        )
+    
+    # Extract and validate file_url
+    file_url = request_model.input.get("file_url")
+    if not file_url:
+        return InvocationResponse(
+            status="error",
+            error=ErrorDetails(
+                code="INVALID_INPUT",
+                message="file_url is required in input",
+                details={
+                    "error_type": "ValidationError",
+                    "required_fields": ["file_url"]
+                }
+            ),
+            trace_id=trace_id
+        )
+    
+    try:
+        # Download file from URL
+        import httpx
+        async with httpx.AsyncClient() as client:
+            response = await client.get(file_url, timeout=request_model.timeout or 30)
+            response.raise_for_status()
+            content_type = response.headers.get("content-type", "").lower()
+            contents = response.content
+            
+            # Process the matrix using our existing OCR logic
+            matrix_data, validation_errors, validation_warnings = await process_matrix_with_ocr(contents, content_type)
+            
+            # Return successful response
+            return InvocationResponse(
+                status="success",
+                result={
+                    "data": matrix_data,
+                    "validation": {
+                        "errors": validation_errors,
+                        "warnings": validation_warnings
+                    },
+                    "processing_info": {
+                        "content_type": content_type,
+                        "file_size": len(contents)
+                    }
+                },
+                trace_id=trace_id
+            )
+            
+    except httpx.TimeoutException:
+        return InvocationResponse(
+            status="error",
+            error=ErrorDetails(
+                code="TIMEOUT",
+                message="Request timed out while downloading file",
+                details={
+                    "error_type": "TimeoutError",
+                    "timeout_seconds": request_model.timeout or 30
+                }
+            ),
+            trace_id=trace_id
+        )
+    except httpx.HTTPError as e:
+        return InvocationResponse(
+            status="error",
+            error=ErrorDetails(
+                code="DOWNLOAD_ERROR",
+                message=f"Failed to download file: {str(e)}",
+                details={
+                    "error_type": "HTTPError",
+                    "status_code": e.response.status_code if hasattr(e, 'response') else None
+                }
+            ),
+            trace_id=trace_id
+        )
+    except Exception as e:
+        logger.error(f"Error processing request: {str(e)}")
+        return InvocationResponse(
+            status="error",
+            error=ErrorDetails(
+                code="PROCESSING_ERROR",
+                message="Error processing matrix file",
+                details={
+                    "error_type": type(e).__name__,
+                    "error_message": str(e)
+                }
+            ),
+            trace_id=trace_id
+        )
+
 @app.get("/healthz")
-async def healthz():
+async def healthz(rate_limit: bool = Depends(rate_limiter)):
     try:
         # Test OpenAI client initialization
         if not client.api_key:
@@ -219,7 +627,10 @@ async def healthz():
         }
 
 @app.post("/api/process-matrix", response_model=MatrixResponse)
-async def process_matrix(file: UploadFile = File(...)):
+async def process_matrix(
+    file: UploadFile = File(...),
+    rate_limit: bool = Depends(rate_limiter)
+):
     """
     Process an uploaded matrix image using OCR and GPT-4 Vision analysis.
     
@@ -229,6 +640,8 @@ async def process_matrix(file: UploadFile = File(...)):
     Returns:
         MatrixResponse: Structured data extracted from the matrix with validation results
     """
+    start_time = time.time()
+    request_counts["total"] += 1
     try:
         # Read the uploaded file
         contents = await file.read()
@@ -304,6 +717,8 @@ async def process_matrix(file: UploadFile = File(...)):
             }
             
             logger.info(f"Matrix processing completed successfully for {file.filename}")
+            request_counts["success"] += 1
+            request_counts["response_times"].append(time.time() - start_time)
             return JSONResponse(content=response_data)
             
         except Exception as processing_error:
