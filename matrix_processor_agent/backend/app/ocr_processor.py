@@ -67,22 +67,15 @@ def preprocess_image(img_array: np.ndarray) -> np.ndarray:
     horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (horizontal_size, 1))
     horizontal_lines = cv2.morphologyEx(binary, cv2.MORPH_OPEN, horizontal_kernel, iterations=2)
     
-    # Define multiple kernels for different line thicknesses
-    kernels = [
-        cv2.getStructuringElement(cv2.MORPH_RECT, (1, 3)),  # Fine vertical details
-        cv2.getStructuringElement(cv2.MORPH_RECT, (3, 1)),  # Fine horizontal details
-        cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)),  # Medium lines
-        cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))   # Broad structures
-    ]
+    # Single balanced kernel for line detection
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))  # Medium scale for balanced detection
     
-    # Apply morphological operations with different kernels
+    # Apply morphological operations with single kernel
     processed = cv2.bitwise_or(vertical_lines, horizontal_lines)
-    for kernel in kernels:
-        # Close gaps in lines
-        closed = cv2.morphologyEx(processed, cv2.MORPH_CLOSE, kernel, iterations=2)
-        # Remove noise while preserving structure
-        opened = cv2.morphologyEx(closed, cv2.MORPH_OPEN, kernel, iterations=1)
-        processed = cv2.bitwise_or(processed, opened)
+    # Close gaps in lines with single iteration
+    processed = cv2.morphologyEx(processed, cv2.MORPH_CLOSE, kernel, iterations=1)
+    # Remove noise while preserving structure
+    processed = cv2.morphologyEx(processed, cv2.MORPH_OPEN, kernel, iterations=1)
     
     # Final cleanup to connect nearby components
     cleanup_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
@@ -116,19 +109,9 @@ def calculate_line_metrics(processed_img: np.ndarray) -> Dict[str, float]:
         cv2.THRESH_BINARY_INV, 11, 2
     )
     
-    # Define multiple kernel sizes with finer granularity for vertical detection
-    horizontal_kernel_sizes = [
-        max(15, width // 50),   # Very fine details
-        max(30, width // 40),   # Fine details
-        max(45, width // 30),   # Medium lines
-        max(60, width // 20)    # Thick lines
-    ]
-    vertical_kernel_sizes = [
-        max(10, height // 60),  # Very fine details
-        max(20, height // 50),  # Fine details
-        max(30, height // 40),  # Medium lines
-        max(40, height // 30)   # Thick lines
-    ]
+    # Single kernel size for each direction
+    horizontal_kernel_sizes = [max(30, width // 30)]  # Medium scale for balanced detection
+    vertical_kernel_sizes = [max(20, height // 30)]   # Medium scale for balanced detection
     
     # Initialize accumulator images
     horizontal_lines = np.zeros_like(binary)
@@ -227,16 +210,9 @@ def detect_table_structure(processed_img: np.ndarray) -> Dict[str, Any]:
     # Apply bilateral filter to reduce noise while preserving edges
     enhanced = cv2.bilateralFilter(enhanced, 9, 75, 75)
     
-    # Enhanced multi-scale line detection with finer granularity
-    # Calculate adaptive scales based on image dimensions
-    min_scale = max(2, min(width, height) // 200)  # Smaller base scale
-    scales = [
-        (min_scale, min_scale),          # Very fine details
-        (min_scale * 2, min_scale * 2),  # Fine details
-        (min_scale * 3, min_scale * 3),  # Medium details
-        (min_scale * 4, min_scale * 4),  # Medium-coarse details
-        (min_scale * 5, min_scale * 5)   # Coarse details
-    ]
+    # Single scale for line detection
+    min_scale = max(3, min(width, height) // 100)  # Medium base scale
+    scales = [(min_scale * 2, min_scale * 2)]  # Single balanced scale for detection
     
     # Initialize accumulators with more precise preprocessing
     horizontal_acc = np.zeros_like(enhanced)
@@ -269,11 +245,6 @@ def detect_table_structure(processed_img: np.ndarray) -> Dict[str, Any]:
     connect_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
     enhanced = cv2.morphologyEx(enhanced, cv2.MORPH_CLOSE, connect_kernel)
     
-    # Save preprocessed image for debugging
-    debug_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "debug_output")
-    os.makedirs(debug_dir, exist_ok=True)
-    cv2.imwrite(os.path.join(debug_dir, "preprocessed_enhanced.png"), enhanced)
-    
     for scale_w, scale_h in scales:
         # Create kernels for current scale
         h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (scale_w, 1))
@@ -281,13 +252,11 @@ def detect_table_structure(processed_img: np.ndarray) -> Dict[str, Any]:
         
         # Enhanced horizontal line detection
         h_temp = enhanced.copy()
-        # First pass: Very aggressive horizontal detection
-        h_temp = cv2.morphologyEx(h_temp, cv2.MORPH_OPEN, h_kernel, iterations=3)
-        # Second pass: connect nearby horizontal components with multiple scales
-        for connect_scale in [scale_w//3, scale_w//2, scale_w]:
-            h_connect = cv2.getStructuringElement(cv2.MORPH_RECT, (connect_scale, 1))
-            h_temp = cv2.morphologyEx(h_temp, cv2.MORPH_CLOSE, h_connect)
-        # Additional dilation to thicken lines
+        # Single pass horizontal detection with balanced parameters
+        h_temp = cv2.morphologyEx(h_temp, cv2.MORPH_OPEN, h_kernel, iterations=1)
+        h_connect = cv2.getStructuringElement(cv2.MORPH_RECT, (scale_w, 1))
+        h_temp = cv2.morphologyEx(h_temp, cv2.MORPH_CLOSE, h_connect)
+        # Light dilation to maintain line visibility
         h_temp = cv2.dilate(h_temp, h_kernel, iterations=1)
         
         # Use probabilistic Hough transform with very lenient parameters
@@ -309,16 +278,11 @@ def detect_table_structure(processed_img: np.ndarray) -> Dict[str, Any]:
         v_temp = enhanced.copy()
         logging.debug(f"Processing vertical lines at scale {scale_h}")
         
-        # First pass: Very aggressive vertical detection
-        v_temp = cv2.morphologyEx(v_temp, cv2.MORPH_OPEN, v_kernel, iterations=3)
-        v_temp = cv2.morphologyEx(v_temp, cv2.MORPH_CLOSE, v_kernel, iterations=4)
-        # Additional dilation to thicken lines
+        # Single pass vertical detection with balanced parameters
+        v_temp = cv2.morphologyEx(v_temp, cv2.MORPH_OPEN, v_kernel, iterations=1)
+        v_temp = cv2.morphologyEx(v_temp, cv2.MORPH_CLOSE, v_kernel, iterations=1)
+        # Light dilation to maintain line visibility
         v_temp = cv2.dilate(v_temp, v_kernel, iterations=1)
-        
-        # Second pass: Multi-scale refinement
-        for sub_scale in [scale_h//2, scale_h//3]:
-            refine_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, max(3, sub_scale)))
-            v_temp = cv2.morphologyEx(v_temp, cv2.MORPH_CLOSE, refine_kernel)
         
         # Super lenient Hough parameters for vertical lines
         v_lines = cv2.HoughLinesP(v_temp, 1, np.pi/180,
@@ -351,88 +315,91 @@ def detect_table_structure(processed_img: np.ndarray) -> Dict[str, Any]:
             if w * h < min_area or max(w, h) < min_length:
                 cv2.drawContours(lines, [contour], -1, 0, -1)
     
-    # Create debug directory
-    debug_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "debug_output")
-    os.makedirs(debug_dir, exist_ok=True)
-    
     # Log line detection results
     h_pixels = cv2.countNonZero(horizontal_acc)
     v_pixels = cv2.countNonZero(vertical_acc)
     logging.info(f"Line detection - Horizontal pixels: {h_pixels}, Vertical pixels: {v_pixels}")
     
-    # Save debug images
-    cv2.imwrite(os.path.join(debug_dir, "horizontal_lines.png"), horizontal_acc)
-    cv2.imwrite(os.path.join(debug_dir, "vertical_lines.png"), vertical_acc)
-    
-    # Progressive intersection detection with multiple kernel sizes and adaptive dilation
-    kernel_sizes = [(3,3), (5,5), (7,7), (9,9)]  # Added larger kernel
+    # Simplified intersection detection with single kernel size
+    kernel_size = (5,5)  # Medium size kernel for balanced detection
     all_intersections = set()  # Use set to avoid duplicates
     
-    # Calculate adaptive dilation iterations with reasonable caps
+    # Calculate line densities
     h_density = cv2.countNonZero(horizontal_acc) / (width * height)
     v_density = cv2.countNonZero(vertical_acc) / (width * height)
-    # Adjust base iterations for better intersection detection
-    base_iterations = min(6, max(2, int(2 / max(h_density, v_density, 0.01))))
-    logging.info(f"Using base_iterations={base_iterations} based on densities h={h_density:.4f}, v={v_density:.4f}")
+    logging.info(f"Line densities - h={h_density:.4f}, v={v_density:.4f}")
     
-    # Pre-dilate lines slightly to help with intersection detection
+    # Single pre-dilation for intersection detection
     horizontal_acc = cv2.dilate(horizontal_acc, cv2.getStructuringElement(cv2.MORPH_RECT, (3,1)))
     vertical_acc = cv2.dilate(vertical_acc, cv2.getStructuringElement(cv2.MORPH_RECT, (1,3)))
 
-    for k_size in kernel_sizes:
-        logging.info(f"Trying intersection detection with kernel size {k_size}")
+    # Single pass intersection detection
+    logging.info(f"Performing intersection detection with kernel size {kernel_size}")
+    
+    # Create kernels for horizontal and vertical lines
+    h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_size[0]*2, kernel_size[1]))
+    v_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_size[0], kernel_size[1]*2))
+    
+    # Thin lines to single pixel width
+    h_thinned = cv2.ximgproc.thinning(horizontal_acc)
+    v_thinned = cv2.ximgproc.thinning(vertical_acc)
+    
+    # Single dilation for intersection detection
+    h_dilated = cv2.dilate(h_thinned, h_kernel, iterations=1)
+    v_dilated = cv2.dilate(v_thinned, v_kernel, iterations=1)
+    
+    # Find intersections with single pass
+    intersections = cv2.bitwise_and(h_dilated, v_dilated)
+    logging.info(f"Found intersections in single pass")
         
-        # Create kernels with different sizes for horizontal and vertical lines
-        h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k_size[0]*2, k_size[1]))
-        v_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k_size[0], k_size[1]*2))
-        
-        # Enhanced line connectivity with more precise morphological operations
-        # First thin the lines to single pixel width
-        h_thinned = cv2.ximgproc.thinning(horizontal_acc)
-        v_thinned = cv2.ximgproc.thinning(vertical_acc)
-        
-        # Then dilate slightly for intersection detection
-        h_kernel_thin = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 1))
-        v_kernel_thin = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 3))
-        
-        h_dilated = cv2.dilate(h_thinned, h_kernel_thin, iterations=1)
-        v_dilated = cv2.dilate(v_thinned, v_kernel_thin, iterations=1)
-        
-        # Save intermediate results for debugging
-        cv2.imwrite(os.path.join(debug_dir, f"h_thinned_k{k_size[0]}.png"), h_thinned)
-        cv2.imwrite(os.path.join(debug_dir, f"v_thinned_k{k_size[0]}.png"), v_thinned)
-        
-        # Find intersections with progressive dilation
-        for iter_count in range(1, base_iterations + 2):
-            intersections = cv2.bitwise_and(h_dilated, v_dilated)
-            
-            # Save debug images for each iteration
-            debug_prefix = f"k{k_size[0]}_iter{iter_count}"
-            cv2.imwrite(os.path.join(debug_dir, f"h_dilated_{debug_prefix}.png"), h_dilated)
-            cv2.imwrite(os.path.join(debug_dir, f"v_dilated_{debug_prefix}.png"), v_dilated)
-            cv2.imwrite(os.path.join(debug_dir, f"intersections_{debug_prefix}.png"), intersections)
-            
-            if cv2.countNonZero(intersections) > 0:
-                logging.info(f"Found intersections at kernel {k_size}, iteration {iter_count}")
-                break
+        # Find connected components
+    contours, _ = cv2.findContours(intersections, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+    logging.info(f"Found {len(contours)} potential intersection contours")
+    
+    # Filter and collect valid intersections
+    for contour in contours:
+        area = cv2.contourArea(contour)
+        # Basic area constraints
+        if area >= 1 and area <= min(width, height):
+            M = cv2.moments(contour)
+            if M["m00"] != 0:
+                cx = int(M["m10"] / M["m00"])
+                cy = int(M["m01"] / M["m00"])
                 
-            # If no intersections found, dilate more
-            h_dilated = cv2.dilate(h_dilated, h_kernel, iterations=1)
-            v_dilated = cv2.dilate(v_dilated, v_kernel, iterations=1)
-        
-        # Find connected components with detailed logging
-        # Use RETR_LIST to find all contours, not just external ones
-        contours, _ = cv2.findContours(intersections, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-        logging.info(f"Found {len(contours)} potential intersection contours")
-        
-        # Create debug visualization
-        debug_vis = cv2.cvtColor(intersections.copy(), cv2.COLOR_GRAY2BGR)
-        
-        # Filter and collect valid intersections with much more lenient criteria
-        for contour in contours:
-            area = cv2.contourArea(contour)
-            # Super lenient area constraints
-            if area >= 1 and area <= min(width, height):  # Allow any reasonable size
+                # Validation window
+                window = 15
+                y_start = max(0, cy - window)
+                y_end = min(height, cy + window + 1)
+                x_start = max(0, cx - window)
+                x_end = min(width, cx + window + 1)
+                
+                # Get validation windows
+                h_window = h_dilated[y_start:y_end, x_start:x_end]
+                v_window = v_dilated[y_start:y_end, x_start:x_end]
+                
+                # Calculate density scores
+                window_area = (y_end - y_start) * (x_end - x_start)
+                h_density = cv2.countNonZero(h_window) / window_area
+                v_density = cv2.countNonZero(v_window) / window_area
+                
+                # Combined density score
+                combined_density = (h_density * 0.6 + v_density * 0.4)
+                min_density = max(0.02, 1.0 / window_area)
+                
+                if combined_density > min_density:
+                    is_new = True
+                    merge_dist = max(5, 6)  # Fixed merge distance
+                    
+                    # Check existing intersections
+                    for existing in all_intersections:
+                        dist = np.sqrt((cx - existing[0][0])**2 + (cy - existing[0][1])**2)
+                        if dist < merge_dist:
+                            is_new = False
+                            break
+                    
+                    if is_new:
+                        all_intersections.append([[cx, cy]])
+                        logging.debug(f"Added intersection at ({cx},{cy})")
                 M = cv2.moments(contour)
                 if M["m00"] != 0:
                     cx = int(M["m10"] / M["m00"])
@@ -530,8 +497,6 @@ def detect_table_structure(processed_img: np.ndarray) -> Dict[str, Any]:
     cv2.putText(vis_img, f"H-lines: {h_pixels}", (10, 30), font, 1, (0,255,0), 2)
     cv2.putText(vis_img, f"V-lines: {v_pixels}", (10, 60), font, 1, (0,0,255), 2)
     cv2.putText(vis_img, f"Intersections: {len(all_intersections)}", (10, 90), font, 1, (255,0,0), 2)
-    
-    cv2.imwrite(os.path.join(debug_dir, "detected_structure.png"), vis_img)
     
     intersection_points = np.array(all_intersections) if all_intersections else None
     intersection_count = len(all_intersections)
@@ -770,17 +735,9 @@ def extract_text_from_bytes(image_bytes: bytes) -> str:
         img_width = thresh.shape[1]
         img_height = thresh.shape[0]
         
-        # Define multiple kernel sizes for different scales
-        horizontal_kernel_sizes = [
-            max(20, img_width // 40),  # Fine details
-            max(40, img_width // 30),  # Medium lines
-            max(60, img_width // 20)   # Thick lines
-        ]
-        vertical_kernel_sizes = [
-            max(20, img_height // 40),  # Fine details
-            max(40, img_height // 30),  # Medium lines
-            max(60, img_height // 20)   # Thick lines
-        ]
+        # Single balanced kernel size for each direction
+        horizontal_kernel_sizes = [max(30, img_width // 30)]  # Medium scale for balanced detection
+        vertical_kernel_sizes = [max(30, img_height // 30)]   # Medium scale for balanced detection
         
         # Initialize accumulator images
         horizontal_lines = np.zeros_like(denoised)
@@ -792,14 +749,14 @@ def extract_text_from_bytes(image_bytes: bytes) -> str:
             h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (h_size, 1))
             v_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, v_size))
             
-            # Process horizontal lines at current scale
-            h_temp = cv2.erode(denoised, h_kernel, iterations=2)
-            h_temp = cv2.dilate(h_temp, h_kernel, iterations=2)
+            # Process horizontal lines at current scale with single iteration
+            h_temp = cv2.erode(denoised, h_kernel, iterations=1)
+            h_temp = cv2.dilate(h_temp, h_kernel, iterations=1)
             horizontal_lines = cv2.bitwise_or(horizontal_lines, h_temp)
             
-            # Process vertical lines at current scale
-            v_temp = cv2.erode(denoised, v_kernel, iterations=2)
-            v_temp = cv2.dilate(v_temp, v_kernel, iterations=2)
+            # Process vertical lines at current scale with single iteration
+            v_temp = cv2.erode(denoised, v_kernel, iterations=1)
+            v_temp = cv2.dilate(v_temp, v_kernel, iterations=1)
             vertical_lines = cv2.bitwise_or(vertical_lines, v_temp)
         
         # Enhance line connectivity
