@@ -10,11 +10,11 @@ logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="AI Agent Marketplace",
     version="1.0.0",
-    root_path="/api/v1",
     openapi_url="/openapi.json",
     docs_url="/docs",
     redoc_url="/redoc"
@@ -43,14 +43,15 @@ async def http_exception_handler(request: Request, exc: HTTPException):
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_credentials=False,  # Changed to False since we're using token auth
+    allow_methods=["*"],
     allow_headers=["*"],
     expose_headers=["*"]
 )
 
 # Include routers
-app.include_router(agents.router)
+app.include_router(agents.router, prefix="/api/v1/agents", tags=["agents"])
+logger.info(f"Mounted agents router at /api/v1/agents with routes: {[route.path for route in agents.router.routes]}")
 
 @app.get("/healthz")
 async def healthz():

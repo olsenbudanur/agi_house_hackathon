@@ -56,20 +56,23 @@ export function AgentList() {
     try {
       setIsSearching(true)
       setError(null)
-      setSemanticMode(true)
-      const results = await semanticSearch(query)
-        // : agents.filter(agent => {
-        //     console.log('agent:', agent)
-        //     console.log("query:", query)
-        //     const searchTermLower = query.toLowerCase()
-        //     return (
-        //       (agent.name?.toLowerCase() || '').includes(searchTermLower) ||
-        //       (agent.description?.toLowerCase() || '').includes(searchTermLower) ||
-        //       (agent.capabilities || []).some(cap => 
-        //         (cap?.toLowerCase() || '').includes(searchTermLower)
-        //       )
-        //     )
-        //   })
+      let results;
+      if (semanticMode) {
+        console.log('Performing semantic search...');
+        results = await semanticSearch(query);
+        console.log('Semantic search results:', results);
+      } else {
+        results = agents.filter(agent => {
+          const searchTermLower = query.toLowerCase()
+          return (
+            (agent.name?.toLowerCase() || '').includes(searchTermLower) ||
+            (agent.description?.toLowerCase() || '').includes(searchTermLower) ||
+            (agent.capabilities || []).some(cap => 
+              (cap?.toLowerCase() || '').includes(searchTermLower)
+            )
+          )
+        });
+      }
       setAgents(results)
     } catch (error) {
       const errorMessage = error instanceof Error 
@@ -79,10 +82,8 @@ export function AgentList() {
       console.error('Search error:', error)
       setError(errorMessage)
       
-      // Reset agents to initial state on error if in semantic mode
-      if (semanticMode) {
-        fetchAgents()
-      }
+      // Reset agents to initial state on error
+      fetchAgents()
     } finally {
       setIsSearching(false)
     }
@@ -133,7 +134,7 @@ export function AgentList() {
             }}
             className="pl-9"
           />
-          {/* <Button
+          <Button
             variant="ghost"
             size="sm"
             className="absolute right-2 top-2"
@@ -146,7 +147,7 @@ export function AgentList() {
             }}
           >
             {semanticMode ? "Basic Search" : "Semantic Search"}
-          </Button> */}
+          </Button>
         </div>
         <Select value={statusFilter} onValueChange={setStatusFilter}>
           <SelectTrigger className="w-48">
