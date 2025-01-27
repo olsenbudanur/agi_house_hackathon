@@ -92,6 +92,7 @@ export async function invokeAgent(agentId: string, request: InvocationRequest): 
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(request),
+      credentials: 'omit'
     })
     
     const data = await response.json()

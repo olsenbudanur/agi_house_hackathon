@@ -20,6 +20,16 @@ app = FastAPI(
     redoc_url="/redoc"
 )
 
+# Configure CORS for local development
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,  # Changed to False since we're using token auth
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["*"]
+)
+
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
     """Convert HTTPException to our standard error response format"""
@@ -39,15 +49,7 @@ async def http_exception_handler(request: Request, exc: HTTPException):
         }
     )
 
-# Configure CORS for local development
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,  # Changed to False since we're using token auth
-    allow_methods=["*"],
-    allow_headers=["*"],
-    expose_headers=["*"]
-)
+
 
 # Include routers
 app.include_router(agents.router, prefix="/api/v1/agents", tags=["agents"])
