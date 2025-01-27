@@ -1,0 +1,11 @@
+[pytest]
+asyncio_mode = auto
+log_cli = true
+log_cli_level = DEBUG
+env =
+    OPENAI_API_KEY=your_openai_api_key_here
+    PYTHONPATH=/home/ubuntu/matrix-processor/backend
+testpaths = tests
+python_files = test_*.py
+python_classes = Test*
+python_functions = test_*
