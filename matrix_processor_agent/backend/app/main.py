@@ -7,9 +7,10 @@ from typing import Dict, Any, Optional
 import os
 import logging
 import datetime
+from pydantic import BaseModel, Field, HttpUrl
 import time
 from collections import defaultdict
-from typing import List, Optional
+from typing import Dict, List, Optional, Any, Literal
 from openai import OpenAI
 from dotenv import load_dotenv, find_dotenv
 from PIL import Image
@@ -22,6 +23,20 @@ from app.matrix_types import (
 )
 from app.ocr_processor import process_matrix_with_ocr
 import time
+import httpx
+
+
+class InvocationRequest(BaseModel):
+    input: Dict[str, Any]
+    callback_url: Optional[HttpUrl] = None
+    timeout: Optional[int] = Field(default=30, ge=1, le=300)
+    trace_id: str
+
+class InvocationResponse(BaseModel):
+    status: Literal["success", "error", "pending"]
+    result: Optional[Dict[str, Any]] = None
+    error: Optional[Dict[str, Dict[str, Any]]] = None
+    trace_id: str
 
 # Load environment variables
 load_dotenv(find_dotenv())
@@ -334,146 +349,122 @@ async def get_capabilities(rate_limit: bool = Depends(rate_limiter)) -> AgentCap
 
 @app.post("/invoke")
 async def invoke_agent(
-    request: Request,
+    request: InvocationRequest,
     rate_limit: bool = Depends(rate_limiter),
-    marketplace_token: Optional[str] = Header(None, alias="X-Marketplace-Token"),
-    trace_id: str = Header(..., alias="X-Trace-ID")
+    marketplace_token: Optional[str] = Header(None, alias="X-Marketplace-Token")
 ) -> InvocationResponse:
     """Invoke agent functionality endpoint for the marketplace."""
-    logger.info(f"Processing invocation request with trace_id: {trace_id}")
-    
-    try:
-        # Parse and validate request body
-        request_body = await request.json()
-        if not isinstance(request_body, dict):
-            return InvocationResponse(
-                status="error",
-                error=ErrorDetails(
-                    code="INVALID_JSON",
-                    message="Request body must be a JSON object",
-                    details={"error_type": "JSONDecodeError"}
-                ),
-                trace_id=trace_id
-            )
-            
-        request_model = InvocationRequest(**request_body)
-    except JSONDecodeError:
-        return InvocationResponse(
-            status="error",
-            error=ErrorDetails(
-                code="INVALID_JSON",
-                message="Invalid JSON in request body",
-                details={"error_type": "JSONDecodeError"}
-            ),
-            trace_id=trace_id
-        )
-    except ValidationError as e:
-        return InvocationResponse(
-            status="error",
-            error=ErrorDetails(
-                code="VALIDATION_ERROR",
-                message="Invalid request format",
-                details={"error_type": "ValidationError", "errors": e.errors()}
-            ),
-            trace_id=trace_id
-        )
+    logger.info(f"Processing invocation request with trace_id: {request.trace_id}")
     
     # Validate marketplace token
     if not marketplace_token or not marketplace_token.strip():
         return InvocationResponse(
             status="error",
-            error=ErrorDetails(
-                code="INVALID_TOKEN",
-                message="Missing or invalid marketplace token",
-                details={"error_type": "AuthenticationError"}
-            ),
-            trace_id=trace_id
-        )
-    
-    # Extract and validate file_url
-    file_url = request_model.input.get("file_url")
-    if not file_url:
-        return InvocationResponse(
-            status="error",
-            error=ErrorDetails(
-                code="INVALID_INPUT",
-                message="file_url is required in input",
-                details={
-                    "error_type": "ValidationError",
-                    "required_fields": ["file_url"]
+            error={
+                "error": {
+                    "code": "INVALID_TOKEN",
+                    "message": "Missing or invalid marketplace token",
+                    "details": {
+                        "error_type": "AuthenticationError"
+                    }
                 }
-            ),
-            trace_id=trace_id
+            },
+            trace_id=request.trace_id
         )
     
     try:
-        # Download file from URL
-        import httpx
-        async with httpx.AsyncClient() as client:
-            response = await client.get(file_url, timeout=request_model.timeout or 30)
-            response.raise_for_status()
-            content_type = response.headers.get("content-type", "").lower()
-            contents = response.content
-            
-            # Process the matrix using our existing OCR logic
-            matrix_data, validation_errors, validation_warnings = await process_matrix_with_ocr(contents, content_type)
-            
-            # Return successful response
+        # Extract and validate file_url
+        file_url = request.input.get("file_url")
+        if not file_url:
             return InvocationResponse(
-                status="success",
-                result={
-                    "data": matrix_data,
-                    "validation": {
-                        "errors": validation_errors,
-                        "warnings": validation_warnings
-                    },
-                    "processing_info": {
-                        "content_type": content_type,
-                        "file_size": len(contents)
+                status="error",
+                error={
+                    "error": {
+                        "code": "INVALID_INPUT",
+                        "message": "file_url is required in input",
+                        "details": {
+                            "error_type": "ValidationError",
+                            "required_fields": ["file_url"]
+                        }
                     }
                 },
-                trace_id=trace_id
+                trace_id=request.trace_id
             )
-            
-    except httpx.TimeoutException:
-        return InvocationResponse(
-            status="error",
-            error=ErrorDetails(
-                code="TIMEOUT",
-                message="Request timed out while downloading file",
-                details={
-                    "error_type": "TimeoutError",
-                    "timeout_seconds": request_model.timeout or 30
-                }
-            ),
-            trace_id=trace_id
-        )
-    except httpx.HTTPError as e:
-        return InvocationResponse(
-            status="error",
-            error=ErrorDetails(
-                code="DOWNLOAD_ERROR",
-                message=f"Failed to download file: {str(e)}",
-                details={
-                    "error_type": "HTTPError",
-                    "status_code": e.response.status_code if hasattr(e, 'response') else None
-                }
-            ),
-            trace_id=trace_id
-        )
+        
+        try:
+            # Download file from URL
+            async with httpx.AsyncClient() as client:
+                response = await client.get(file_url, timeout=request.timeout or 30)
+                response.raise_for_status()
+                content_type = response.headers.get("content-type", "").lower()
+                contents = response.content
+                
+                # Process the matrix using our existing OCR logic
+                matrix_data, validation_errors, validation_warnings = await process_matrix_with_ocr(contents, content_type)
+                
+                # Return successful response
+                return InvocationResponse(
+                    status="success",
+                    result={
+                        "data": matrix_data,
+                        "validation": {
+                            "errors": validation_errors,
+                            "warnings": validation_warnings
+                        },
+                        "processing_info": {
+                            "content_type": content_type,
+                            "file_size": len(contents)
+                        }
+                    },
+                    trace_id=request.trace_id
+                )
+                
+        except httpx.TimeoutException:
+            return InvocationResponse(
+                status="error",
+                error={
+                    "error": {
+                        "code": "TIMEOUT",
+                        "message": "Request timed out while downloading file",
+                        "details": {
+                            "error_type": "TimeoutError",
+                            "timeout_seconds": request.timeout or 30
+                        }
+                    }
+                },
+                trace_id=request.trace_id
+            )
+        except httpx.HTTPError as e:
+            return InvocationResponse(
+                status="error",
+                error={
+                    "error": {
+                        "code": "DOWNLOAD_ERROR",
+                        "message": f"Failed to download file: {str(e)}",
+                        "details": {
+                            "error_type": "HTTPError",
+                            "status_code": e.response.status_code if hasattr(e, 'response') else None
+                        }
+                    }
+                },
+                trace_id=request.trace_id
+            )
+                
     except Exception as e:
         logger.error(f"Error processing request: {str(e)}")
         return InvocationResponse(
             status="error",
-            error=ErrorDetails(
-                code="PROCESSING_ERROR",
-                message="Error processing matrix file",
-                details={
-                    "error_type": type(e).__name__,
-                    "error_message": str(e)
+            error={
+                "error": {
+                    "code": "INTERNAL_ERROR",
+                    "message": "An internal error occurred",
+                    "details": {
+                        "error_type": type(e).__name__,
+                        "error_message": str(e)
+                    }
                 }
-            ),
-            trace_id=trace_id
+            },
+            trace_id=request.trace_id
         )
 
 @app.get("/healthz")

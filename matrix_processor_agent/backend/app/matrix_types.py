@@ -1,5 +1,5 @@
-from typing import Dict, List, Optional, Union, Any
-from pydantic import BaseModel, Field
+from typing import Dict, List, Optional, Union, Any, Literal
+from pydantic import BaseModel, Field, HttpUrl
 from enum import Enum
 from datetime import datetime
 
@@ -27,8 +27,9 @@ class AgentCapabilities(BaseModel):
 class InvocationRequest(BaseModel):
     """Model for agent invocation request."""
     input: Dict[str, Any]
-    callback_url: Optional[str] = None
-    timeout: Optional[int] = 30
+    callback_url: Optional[HttpUrl] = None
+    timeout: Optional[int] = Field(default=30, ge=1, le=300)
+    trace_id: str
 
 class ErrorDetails(BaseModel):
     """Model for error details in responses."""
@@ -38,7 +39,7 @@ class ErrorDetails(BaseModel):
 
 class InvocationResponse(BaseModel):
     """Model for agent invocation response."""
-    status: str  # "success" | "error" | "pending"
+    status: Literal["success", "error", "pending"]
     result: Optional[Dict[str, Any]] = None
     error: Optional[ErrorDetails] = None
     trace_id: str
