@@ -38,11 +38,9 @@ def analyze_matrix_image(image_path: str):
         # Image preprocessing steps
         # 1. Convert to grayscale
         gray = cv2.cvtColor(opencv_image, cv2.COLOR_BGR2GRAY)
-        cv2.imwrite(str(output_dir / "gray.png"), gray)
         
         # 2. Thresholding
         thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
-        cv2.imwrite(str(output_dir / "thresh.png"), thresh)
         
         # 3. Detect table structure
         horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (40,1))
@@ -50,19 +48,15 @@ def analyze_matrix_image(image_path: str):
         
         horizontal_lines = cv2.erode(thresh, horizontal_kernel, iterations=1)
         horizontal_lines = cv2.dilate(horizontal_lines, horizontal_kernel, iterations=1)
-        cv2.imwrite(str(output_dir / "horizontal_lines.png"), horizontal_lines)
         
         vertical_lines = cv2.erode(thresh, vertical_kernel, iterations=1)
         vertical_lines = cv2.dilate(vertical_lines, vertical_kernel, iterations=1)
-        cv2.imwrite(str(output_dir / "vertical_lines.png"), vertical_lines)
         
         # Combine lines
         table_structure = cv2.addWeighted(horizontal_lines, 0.5, vertical_lines, 0.5, 0.0)
-        cv2.imwrite(str(output_dir / "table_structure.png"), table_structure)
         
         # Remove table structure
         clean_image = cv2.subtract(thresh, table_structure)
-        cv2.imwrite(str(output_dir / "clean_image.png"), clean_image)
         
         # OCR on different versions
         print("\nOriginal Image OCR:")

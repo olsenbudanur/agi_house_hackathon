@@ -269,11 +269,6 @@ def detect_table_structure(processed_img: np.ndarray) -> Dict[str, Any]:
     connect_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
     enhanced = cv2.morphologyEx(enhanced, cv2.MORPH_CLOSE, connect_kernel)
     
-    # Save preprocessed image for debugging
-    debug_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "debug_output")
-    os.makedirs(debug_dir, exist_ok=True)
-    cv2.imwrite(os.path.join(debug_dir, "preprocessed_enhanced.png"), enhanced)
-    
     for scale_w, scale_h in scales:
         # Create kernels for current scale
         h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (scale_w, 1))
@@ -351,18 +346,10 @@ def detect_table_structure(processed_img: np.ndarray) -> Dict[str, Any]:
             if w * h < min_area or max(w, h) < min_length:
                 cv2.drawContours(lines, [contour], -1, 0, -1)
     
-    # Create debug directory
-    debug_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "debug_output")
-    os.makedirs(debug_dir, exist_ok=True)
-    
     # Log line detection results
     h_pixels = cv2.countNonZero(horizontal_acc)
     v_pixels = cv2.countNonZero(vertical_acc)
     logging.info(f"Line detection - Horizontal pixels: {h_pixels}, Vertical pixels: {v_pixels}")
-    
-    # Save debug images
-    cv2.imwrite(os.path.join(debug_dir, "horizontal_lines.png"), horizontal_acc)
-    cv2.imwrite(os.path.join(debug_dir, "vertical_lines.png"), vertical_acc)
     
     # Progressive intersection detection with multiple kernel sizes and adaptive dilation
     kernel_sizes = [(3,3), (5,5), (7,7), (9,9)]  # Added larger kernel
@@ -398,19 +385,9 @@ def detect_table_structure(processed_img: np.ndarray) -> Dict[str, Any]:
         h_dilated = cv2.dilate(h_thinned, h_kernel_thin, iterations=1)
         v_dilated = cv2.dilate(v_thinned, v_kernel_thin, iterations=1)
         
-        # Save intermediate results for debugging
-        cv2.imwrite(os.path.join(debug_dir, f"h_thinned_k{k_size[0]}.png"), h_thinned)
-        cv2.imwrite(os.path.join(debug_dir, f"v_thinned_k{k_size[0]}.png"), v_thinned)
-        
         # Find intersections with progressive dilation
         for iter_count in range(1, base_iterations + 2):
             intersections = cv2.bitwise_and(h_dilated, v_dilated)
-            
-            # Save debug images for each iteration
-            debug_prefix = f"k{k_size[0]}_iter{iter_count}"
-            cv2.imwrite(os.path.join(debug_dir, f"h_dilated_{debug_prefix}.png"), h_dilated)
-            cv2.imwrite(os.path.join(debug_dir, f"v_dilated_{debug_prefix}.png"), v_dilated)
-            cv2.imwrite(os.path.join(debug_dir, f"intersections_{debug_prefix}.png"), intersections)
             
             if cv2.countNonZero(intersections) > 0:
                 logging.info(f"Found intersections at kernel {k_size}, iteration {iter_count}")
@@ -530,8 +507,6 @@ def detect_table_structure(processed_img: np.ndarray) -> Dict[str, Any]:
     cv2.putText(vis_img, f"H-lines: {h_pixels}", (10, 30), font, 1, (0,255,0), 2)
     cv2.putText(vis_img, f"V-lines: {v_pixels}", (10, 60), font, 1, (0,0,255), 2)
     cv2.putText(vis_img, f"Intersections: {len(all_intersections)}", (10, 90), font, 1, (255,0,0), 2)
-    
-    cv2.imwrite(os.path.join(debug_dir, "detected_structure.png"), vis_img)
     
     intersection_points = np.array(all_intersections) if all_intersections else None
     intersection_count = len(all_intersections)
